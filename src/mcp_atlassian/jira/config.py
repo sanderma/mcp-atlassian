@@ -103,6 +103,9 @@ class JiraConfig:
     oauth_config: OAuthConfig | BYOAccessTokenOAuthConfig | None = None
     ssl_verify: bool = True  # Whether to verify SSL certificates
     projects_filter: str | None = None  # List of project keys to filter searches
+    jql_filters: str | None = (
+        None  # Additional JQL clauses to AND into every search (e.g., "parent in (PROJ-123)")
+    )
     http_proxy: str | None = None  # HTTP proxy URL
     https_proxy: str | None = None  # HTTPS proxy URL
     no_proxy: str | None = None  # Comma-separated list of hosts to bypass proxy
@@ -238,6 +241,9 @@ class JiraConfig:
         # Get the projects filter if provided
         projects_filter = os.getenv("JIRA_PROJECTS_FILTER")
 
+        # Get the JQL filters if provided (additional clauses AND-ed into every search)
+        jql_filters = os.getenv("JIRA_JQL_FILTERS")
+
         # Proxy settings
         http_proxy = os.getenv("JIRA_HTTP_PROXY", os.getenv("HTTP_PROXY"))
         https_proxy = os.getenv("JIRA_HTTPS_PROXY", os.getenv("HTTPS_PROXY"))
@@ -271,6 +277,7 @@ class JiraConfig:
             oauth_config=oauth_config,
             ssl_verify=ssl_verify,
             projects_filter=projects_filter,
+            jql_filters=jql_filters,
             http_proxy=http_proxy,
             https_proxy=https_proxy,
             no_proxy=no_proxy,

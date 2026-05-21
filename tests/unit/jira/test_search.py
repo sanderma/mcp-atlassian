@@ -26,6 +26,7 @@ class TestSearchMixin:
         mixin.config = MagicMock()
         mixin.config.is_cloud = False
         mixin.config.projects_filter = None
+        mixin.config.jql_filters = None
         mixin.config.url = "https://example.atlassian.net"
 
         return mixin
@@ -1204,3 +1205,311 @@ class TestSearchMixin:
         )
         # The result should not have a next_page_token from Server/DC
         assert result.next_page_token is None
+
+    # ------------------------------------------------------------------
+    # jql_filters tests
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("is_cloud", [True, False])
+    def test_search_issues_with_jql_filters_param(
+        self,
+        search_mixin: SearchMixin,
+        mock_issues_response,
+        is_cloud: bool,
+    ):
+        """Test that jql_filters parameter is AND-ed into the JQL."""
+        search_mixin.config.is_cloud = is_cloud
+        search_mixin.config.projects_filter = None
+        search_mixin.config.jql_filters = None
+        search_mixin.config.url = "https://test.example.com"
+
+        search_mixin.jira.post = MagicMock(return_value=mock_issues_response)
+        search_mixin.jira.jql = MagicMock(return_value=mock_issues_response)
+
+        def get_jql_from_call() -> str:
+            if is_cloud:
+                return search_mixin.jira.post.call_args[1]["json"]["jql"]
+            return search_mixin.jira.jql.call_args[0][0]
+
+        search_mixin.search_issues("project = TEST", jql_filters="parent in (PROJ-123)")
+        assert get_jql_from_call() == "(project = TEST) AND parent in (PROJ-123)"
+
+    @pytest.mark.parametrize("is_cloud", [True, False])
+    def test_search_issues_with_config_jql_filters(
+        self,
+        search_mixin: SearchMixin,
+        mock_issues_response,
+        is_cloud: bool,
+    ):
+        """Test that config-level jql_filters is AND-ed into the JQL."""
+        search_mixin.config.is_cloud = is_cloud
+        search_mixin.config.projects_filter = None
+        search_mixin.config.jql_filters = "parent in (PROJ-123)"
+        search_mixin.config.url = "https://test.example.com"
+
+        search_mixin.jira.post = MagicMock(return_value=mock_issues_response)
+        search_mixin.jira.jql = MagicMock(return_value=mock_issues_response)
+
+        def get_jql_from_call() -> str:
+            if is_cloud:
+                return search_mixin.jira.post.call_args[1]["json"]["jql"]
+            return search_mixin.jira.jql.call_args[0][0]
+
+        search_mixin.search_issues("project = TEST")
+        assert get_jql_from_call() == "(project = TEST) AND parent in (PROJ-123)"
+
+    @pytest.mark.parametrize("is_cloud", [True, False])
+    def test_search_issues_jql_filters_overrides_config(
+        self,
+        search_mixin: SearchMixin,
+        mock_issues_response,
+        is_cloud: bool,
+    ):
+        """Test that jql_filters parameter overrides config-level jql_filters."""
+        search_mixin.config.is_cloud = is_cloud
+        search_mixin.config.projects_filter = None
+        search_mixin.config.jql_filters = "parent in (EPIC-999)"
+        search_mixin.config.url = "https://test.example.com"
+
+        search_mixin.jira.post = MagicMock(return_value=mock_issues_response)
+        search_mixin.jira.jql = MagicMock(return_value=mock_issues_response)
+
+        def get_jql_from_call() -> str:
+            if is_cloud:
+                return search_mixin.jira.post.call_args[1]["json"]["jql"]
+            return search_mixin.jira.jql.call_args[0][0]
+
+        # Parameter should override the config value
+        search_mixin.search_issues("project = TEST", jql_filters="parent in (PROJ-123)")
+        assert get_jql_from_call() == "(project = TEST) AND parent in (PROJ-123)"
+
+    @pytest.mark.parametrize("is_cloud", [True, False])
+    def test_search_issues_jql_filters_with_projects_filter(
+        self,
+        search_mixin: SearchMixin,
+        mock_issues_response,
+        is_cloud: bool,
+    ):
+        """Test that jql_filters combines correctly with projects_filter."""
+        search_mixin.config.is_cloud = is_cloud
+        search_mixin.config.projects_filter = None
+        search_mixin.config.jql_filters = None
+        search_mixin.config.url = "https://test.example.com"
+
+        search_mixin.jira.post = MagicMock(return_value=mock_issues_response)
+        search_mixin.jira.jql = MagicMock(return_value=mock_issues_response)
+
+        def get_jql_from_call() -> str:
+            if is_cloud:
+                return search_mixin.jira.post.call_args[1]["json"]["jql"]
+            return search_mixin.jira.jql.call_args[0][0]
+
+        search_mixin.search_issues(
+            "status = Open",
+            projects_filter="PROJ1",
+            jql_filters="parent in (PROJ-123)",
+        )
+        jql = get_jql_from_call()
+        assert "project = PROJ1" in jql
+        assert "parent in (PROJ-123)" in jql
+        assert jql == "((status = Open) AND project = PROJ1) AND parent in (PROJ-123)"
+
+    @pytest.mark.parametrize("is_cloud", [True, False])
+    def test_search_issues_jql_filters_empty_jql(
+        self,
+        search_mixin: SearchMixin,
+        mock_issues_response,
+        is_cloud: bool,
+    ):
+        """Test jql_filters with empty JQL."""
+        search_mixin.config.is_cloud = is_cloud
+        search_mixin.config.projects_filter = None
+        search_mixin.config.jql_filters = None
+        search_mixin.config.url = "https://test.example.com"
+
+        search_mixin.jira.post = MagicMock(return_value=mock_issues_response)
+        search_mixin.jira.jql = MagicMock(return_value=mock_issues_response)
+
+        def get_jql_from_call() -> str:
+            if is_cloud:
+                return search_mixin.jira.post.call_args[1]["json"]["jql"]
+            return search_mixin.jira.jql.call_args[0][0]
+
+        search_mixin.search_issues("", jql_filters="parent in (PROJ-123)")
+        assert get_jql_from_call() == "parent in (PROJ-123)"
+
+    @pytest.mark.parametrize("is_cloud", [True, False])
+    def test_search_issues_jql_filters_with_order_by(
+        self,
+        search_mixin: SearchMixin,
+        mock_issues_response,
+        is_cloud: bool,
+    ):
+        """Test jql_filters with ORDER BY clause."""
+        search_mixin.config.is_cloud = is_cloud
+        search_mixin.config.projects_filter = None
+        search_mixin.config.jql_filters = None
+        search_mixin.config.url = "https://test.example.com"
+
+        search_mixin.jira.post = MagicMock(return_value=mock_issues_response)
+        search_mixin.jira.jql = MagicMock(return_value=mock_issues_response)
+
+        def get_jql_from_call() -> str:
+            if is_cloud:
+                return search_mixin.jira.post.call_args[1]["json"]["jql"]
+            return search_mixin.jira.jql.call_args[0][0]
+
+        search_mixin.search_issues(
+            "status = Open ORDER BY created DESC",
+            jql_filters="parent in (PROJ-123)",
+        )
+        assert (
+            get_jql_from_call()
+            == "(status = Open) AND parent in (PROJ-123) ORDER BY created DESC"
+        )
+
+    @pytest.mark.parametrize("is_cloud", [True, False])
+    def test_search_issues_jql_filters_order_by_only(
+        self,
+        search_mixin: SearchMixin,
+        mock_issues_response,
+        is_cloud: bool,
+    ):
+        """Test jql_filters with JQL starting with ORDER BY."""
+        search_mixin.config.is_cloud = is_cloud
+        search_mixin.config.projects_filter = None
+        search_mixin.config.jql_filters = None
+        search_mixin.config.url = "https://test.example.com"
+
+        search_mixin.jira.post = MagicMock(return_value=mock_issues_response)
+        search_mixin.jira.jql = MagicMock(return_value=mock_issues_response)
+
+        def get_jql_from_call() -> str:
+            if is_cloud:
+                return search_mixin.jira.post.call_args[1]["json"]["jql"]
+            return search_mixin.jira.jql.call_args[0][0]
+
+        search_mixin.search_issues(
+            "ORDER BY created DESC",
+            jql_filters="parent in (PROJ-123)",
+        )
+        assert get_jql_from_call() == "parent in (PROJ-123) ORDER BY created DESC"
+
+    def test_get_board_issues_with_jql_filters(
+        self,
+        search_mixin: SearchMixin,
+    ):
+        """Test get_board_issues with jql_filters."""
+        mock_issues = {
+            "issues": [
+                {
+                    "id": "10001",
+                    "key": "TEST-123",
+                    "fields": {
+                        "summary": "Test issue",
+                        "issuetype": {"name": "Story"},
+                        "status": {"name": "Open"},
+                    },
+                }
+            ],
+            "total": 1,
+            "startAt": 0,
+            "maxResults": 50,
+        }
+        search_mixin.jira.get_issues_for_board = MagicMock(return_value=mock_issues)
+
+        search_mixin.get_board_issues(
+            "1000", jql="status = Open", jql_filters="parent in (PROJ-123)"
+        )
+
+        call_kwargs = search_mixin.jira.get_issues_for_board.call_args
+        assert call_kwargs[1]["jql"] == "(status = Open) AND parent in (PROJ-123)"
+
+    def test_get_board_issues_with_config_jql_filters(
+        self,
+        search_mixin: SearchMixin,
+    ):
+        """Test get_board_issues with config-level jql_filters."""
+        mock_issues = {
+            "issues": [
+                {
+                    "id": "10001",
+                    "key": "TEST-123",
+                    "fields": {
+                        "summary": "Test issue",
+                        "issuetype": {"name": "Story"},
+                        "status": {"name": "Open"},
+                    },
+                }
+            ],
+            "total": 1,
+            "startAt": 0,
+            "maxResults": 50,
+        }
+        search_mixin.config.jql_filters = "parent in (PROJ-123)"
+        search_mixin.jira.get_issues_for_board = MagicMock(return_value=mock_issues)
+
+        search_mixin.get_board_issues("1000", jql="status = Open")
+
+        call_kwargs = search_mixin.jira.get_issues_for_board.call_args
+        assert call_kwargs[1]["jql"] == "(status = Open) AND parent in (PROJ-123)"
+
+    def test_get_board_issues_jql_filters_overrides_config(
+        self,
+        search_mixin: SearchMixin,
+    ):
+        """Test get_board_issues jql_filters parameter overrides config."""
+        mock_issues = {
+            "issues": [
+                {
+                    "id": "10001",
+                    "key": "TEST-123",
+                    "fields": {
+                        "summary": "Test issue",
+                        "issuetype": {"name": "Story"},
+                        "status": {"name": "Open"},
+                    },
+                }
+            ],
+            "total": 1,
+            "startAt": 0,
+            "maxResults": 50,
+        }
+        search_mixin.config.jql_filters = "parent in (EPIC-999)"
+        search_mixin.jira.get_issues_for_board = MagicMock(return_value=mock_issues)
+
+        search_mixin.get_board_issues(
+            "1000", jql="status = Open", jql_filters="parent in (PROJ-123)"
+        )
+
+        call_kwargs = search_mixin.jira.get_issues_for_board.call_args
+        assert call_kwargs[1]["jql"] == "(status = Open) AND parent in (PROJ-123)"
+
+    def test_get_board_issues_jql_filters_empty_jql(
+        self,
+        search_mixin: SearchMixin,
+    ):
+        """Test get_board_issues with jql_filters and empty JQL."""
+        mock_issues = {
+            "issues": [
+                {
+                    "id": "10001",
+                    "key": "TEST-123",
+                    "fields": {
+                        "summary": "Test issue",
+                        "issuetype": {"name": "Story"},
+                        "status": {"name": "Open"},
+                    },
+                }
+            ],
+            "total": 1,
+            "startAt": 0,
+            "maxResults": 50,
+        }
+        search_mixin.config.jql_filters = None
+        search_mixin.jira.get_issues_for_board = MagicMock(return_value=mock_issues)
+
+        search_mixin.get_board_issues("1000", jql="", jql_filters="parent in (PROJ-123)")
+
+        call_kwargs = search_mixin.jira.get_issues_for_board.call_args
+        assert call_kwargs[1]["jql"] == "parent in (PROJ-123)"

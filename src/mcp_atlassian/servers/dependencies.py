@@ -136,7 +136,7 @@ def _jira_spec() -> _ServiceSpec:
         config_attr="full_jira_config",
         url_header="X-Atlassian-Jira-Url",
         token_header="X-Atlassian-Jira-Personal-Token",  # noqa: S106
-        filter_kwargs={"projects_filter": None},
+        filter_kwargs={"projects_filter": None, "jql_filters": None},
         get_session=lambda f: f.jira._session,
         validate_fn=lambda f: f.get_current_user_account_id(),
         on_validated=_jira_on_validated,
@@ -488,6 +488,7 @@ def _create_user_config_for_fetcher(
             base_config, **common_args
         )
         user_jira_config.projects_filter = base_config.projects_filter
+        user_jira_config.jql_filters = base_config.jql_filters
         return user_jira_config
     elif isinstance(base_config, ConfluenceConfig):
         user_confluence_config: UserConfluenceConfigType = dataclasses.replace(

@@ -97,6 +97,28 @@ Documentation is also available in [llms.txt format](https://llmstxt.org/), whic
 
 **72 tools total** — See [Tools Reference](https://mcp-atlassian.soomiles.com/docs/tools-reference) for the complete list.
 
+## Content Filtering
+
+Filter which content the server sees — useful for restricting AI agents to specific projects or teams.
+
+| Variable | Tool Param | Description |
+|----------|-----------|-------------|
+| `JIRA_PROJECTS_FILTER` | `projects_filter` | Comma-separated project keys (e.g., `PROJ,DEVOPS`). Restricts search and issue access to listed projects. |
+| `JIRA_JQL_FILTERS` | `jql_filters` | Additional JQL clauses AND-ed into every search query (e.g., `parent in (PROJ-123)`). Use for team-level or cross-cutting filters. |
+
+Both have a config-level value (env var) and a per-request override (tool parameter). Per-request values take precedence.
+
+**Example: team-scoped agent**
+```json
+{
+  "env": {
+    "JIRA_URL": "https://your-company.atlassian.net",
+    "JIRA_PROJECTS_FILTER": "PROJ,DEVOPS",
+    "JIRA_JQL_FILTERS": "parent in (PROJ-123)"
+  }
+}
+```
+
 ## Security
 
 Never share API tokens. Keep `.env` files secure. See [SECURITY.md](SECURITY.md).

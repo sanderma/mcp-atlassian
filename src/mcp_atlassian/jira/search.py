@@ -82,6 +82,7 @@ class SearchMixin(JiraClient, IssueOperationsProto):
         expand: str | None = None,
         projects_filter: str | None = None,
         page_token: str | None = None,
+        jql_filters: str | None = None,
     ) -> JiraSearchResult:
         """
         Search for issues using JQL (Jira Query Language).
@@ -99,6 +100,9 @@ class SearchMixin(JiraClient, IssueOperationsProto):
                 replaces it)
             page_token: Optional pagination token from a previous search result.
                   Cloud only — Server/DC uses start for pagination.
+            jql_filters: Optional additional JQL clauses to AND into the query.
+                  Overrides the config-level JIRA_JQL_FILTERS if provided.
+                  Example: "parent in (PROJ-123) AND issuetype = Story"
 
         Returns:
             JiraSearchResult object containing issues and metadata (total, start_at, max_results)
@@ -115,6 +119,27 @@ class SearchMixin(JiraClient, IssueOperationsProto):
 
             # Constrain to the allowed projects (JIRA_PROJECTS_FILTER)
             jql = self._apply_projects_filter(jql, projects_filter)
+
+            # Apply JQL filters if present (additional AND clauses)
+            jql_filter_to_use = jql_filters or self.config.jql_filters
+            if jql_filter_to_use:
+                if not jql:
+                    jql = jql_filter_to_use
+                elif jql.strip().upper().startswith("ORDER BY"):
+                    jql = f"{jql_filter_to_use} {jql}"
+                else:
+                    # Extract ORDER BY clause if present to keep it at the end
+                    order_match = re.search(
+                        r"\s+(ORDER\s+BY\s+.*)$", jql, re.IGNORECASE
+                    )
+                    if order_match:
+                        order_clause = order_match.group(1)
+                        jql_without_order = jql[: order_match.start()]
+                        jql = f"({jql_without_order}) AND {jql_filter_to_use} {order_clause}"
+                    else:
+                        jql = f"({jql}) AND {jql_filter_to_use}"
+
+                logger.info(f"Applied JQL filters to query: {jql}")
 
             # Convert fields to proper format if it's a list/tuple/set
             fields_param: str | None
@@ -228,6 +253,7 @@ class SearchMixin(JiraClient, IssueOperationsProto):
         start: int = 0,
         limit: int = 50,
         expand: str | None = None,
+        jql_filters: str | None = None,
     ) -> JiraSearchResult:
         """
         Get all issues linked to a specific board.
@@ -239,6 +265,8 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             start: Starting index
             limit: Maximum issues to return
             expand: Optional items to expand (comma-separated)
+            jql_filters: Optional additional JQL clauses to AND into the query.
+                  Overrides the config-level JIRA_JQL_FILTERS if provided.
 
         Returns:
             JiraSearchResult object containing board issues and metadata
@@ -254,6 +282,15 @@ class SearchMixin(JiraClient, IssueOperationsProto):
 
             # Constrain board issues to the allowed projects (JIRA_PROJECTS_FILTER)
             jql = self._apply_projects_filter(jql)
+
+            # Apply JQL filters if present
+            jql_filter_to_use = jql_filters or self.config.jql_filters
+            if jql_filter_to_use:
+                if jql:
+                    jql = f"({jql}) AND {jql_filter_to_use}"
+                else:
+                    jql = jql_filter_to_use
+                logger.info(f"Applied JQL filters to board query: {jql}")
 
             # Determine fields_param
             fields_param = fields

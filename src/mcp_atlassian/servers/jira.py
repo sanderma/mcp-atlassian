@@ -824,6 +824,17 @@ async def search(
             default=False,
         ),
     ] = False,
+    jql_filters: Annotated[
+        str | None,
+        Field(
+            description=(
+                "(Optional) Additional JQL clauses to AND into the query. "
+                "Overrides the config-level JIRA_JQL_FILTERS if provided. "
+                'Example: "parent in (PROJ-123) AND issuetype = Story"'
+            ),
+            default=None,
+        ),
+    ] = None,
 ) -> str:
     """Search Jira issues using JQL (Jira Query Language).
 
@@ -837,6 +848,7 @@ async def search(
         expand: Optional fields to expand.
         page_token: Pagination token from a previous search result (Cloud only).
         use_display_names: Opt into human-readable custom field keys.
+        jql_filters: Additional JQL clauses to AND into the query.
 
     Returns:
         JSON string representing the search results including pagination info.
@@ -858,6 +870,7 @@ async def search(
         expand=expand,
         projects_filter=projects_filter,
         page_token=page_token,
+        jql_filters=jql_filters,
     )
     if use_display_names:
         result = search_result.to_display_name_dict()
@@ -1554,6 +1567,17 @@ async def get_board_issues(
             default="version",
         ),
     ] = "version",
+    jql_filters: Annotated[
+        str | None,
+        Field(
+            description=(
+                "(Optional) Additional JQL clauses to AND into the query. "
+                "Overrides the config-level JIRA_JQL_FILTERS if provided. "
+                'Example: "parent in (PROJ-123) AND issuetype = Story"'
+            ),
+            default=None,
+        ),
+    ] = None,
 ) -> str:
     """Get all issues linked to a specific board filtered by JQL.
 
@@ -1565,6 +1589,7 @@ async def get_board_issues(
         start_at: Starting index for pagination.
         limit: Maximum number of results.
         expand: Optional fields to expand.
+        jql_filters: Additional JQL clauses to AND into the query.
 
     Returns:
         JSON string representing the search results including pagination info.
@@ -1581,6 +1606,7 @@ async def get_board_issues(
         start=start_at,
         limit=limit,
         expand=expand,
+        jql_filters=jql_filters,
     )
     result = search_result.to_simplified_dict()
     return json.dumps(result, indent=2, ensure_ascii=False)

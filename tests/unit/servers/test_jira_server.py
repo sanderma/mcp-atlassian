@@ -702,6 +702,7 @@ async def test_search(jira_client, mock_jira_fetcher):
         expand=None,
         projects_filter=None,
         page_token=None,
+        jql_filters=None,
     )
 
 

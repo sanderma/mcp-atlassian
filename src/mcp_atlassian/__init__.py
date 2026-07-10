@@ -195,6 +195,10 @@ async def _run_stdio_with_stdin_guard(run_kwargs: dict[str, object]) -> None:
     help="Comma-separated list of Jira project keys to filter search results",
 )
 @click.option(
+    "--jira-jql-filters",
+    help="Additional JQL clauses to AND into every search (e.g., 'parent in (PROJ-123)')",
+)
+@click.option(
     "--read-only",
     is_flag=True,
     help="Run in read-only mode (disables all write operations)",
@@ -253,6 +257,7 @@ def main(
     jira_personal_token: str | None,
     jira_ssl_verify: bool,
     jira_projects_filter: str | None,
+    jira_jql_filters: str | None,
     read_only: bool,
     enabled_tools: str | None,
     toolsets: str | None,
@@ -413,6 +418,8 @@ def main(
         os.environ["JIRA_SSL_VERIFY"] = str(jira_ssl_verify).lower()
     if click_ctx and was_option_provided(click_ctx, "jira_projects_filter"):
         os.environ["JIRA_PROJECTS_FILTER"] = jira_projects_filter
+    if click_ctx and was_option_provided(click_ctx, "jira_jql_filters"):
+        os.environ["JIRA_JQL_FILTERS"] = jira_jql_filters
 
     from mcp_atlassian.servers import main_mcp
 

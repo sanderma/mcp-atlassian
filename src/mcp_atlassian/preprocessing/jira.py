@@ -391,7 +391,14 @@ class JiraMarkupRenderer(JiraRenderer):
     def render_inline_code(self, token: Any) -> str:
         # Jira renders {{...}} content literally; backslash escapes
         # inserted by render_raw_text would show up verbatim.
-        return "{{" + token.children[0].content + "}}"
+        content = token.children[0].content
+        # Content starting or ending with a brace would merge with the
+        # {{ }} delimiters into {{{...}}}, which Jira's renderer cannot
+        # disambiguate; pad with spaces to keep the delimiters intact
+        # (issue #1 on this fork).
+        if content and (content[0] in "{}" or content[-1] in "{}"):
+            content = f" {content} "
+        return "{{" + content + "}}"
 
     def render_block_code(self, token: Any) -> str:
         lang = token.language or ""

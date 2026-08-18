@@ -1761,6 +1761,39 @@ class TestMarkdownToJiraParser:
         result = preprocessor.markdown_to_jira("run `my_var --dry-run` now")
         assert "{{my_var --dry-run}}" in result
 
+    def test_inline_code_with_leading_brace(self, preprocessor):
+        """Inline code starting with { must not produce triple braces."""
+        assert (
+            preprocessor.markdown_to_jira("use `{panel}` here")
+            == "use {{ {panel} }} here"
+        )
+
+    def test_inline_code_with_trailing_brace(self, preprocessor):
+        """Inline code ending with } must not produce triple braces."""
+        assert (
+            preprocessor.markdown_to_jira("use `{code:go}` here")
+            == "use {{ {code:go} }} here"
+        )
+
+    def test_inline_code_with_double_braces(self, preprocessor):
+        """Inline code with {{...}} content must not produce quad braces."""
+        assert (
+            preprocessor.markdown_to_jira("set `{{.Values.x}}` here")
+            == "set {{ {{.Values.x}} }} here"
+        )
+
+    def test_inline_code_without_braces_unchanged(self, preprocessor):
+        """Inline code without leading/trailing braces must not be padded."""
+        assert (
+            preprocessor.markdown_to_jira("use `customfield_10101` here")
+            == "use {{customfield_10101}} here"
+        )
+        # Braces only in the middle keep the delimiters unambiguous
+        assert (
+            preprocessor.markdown_to_jira("call `fn() {ok} end` here")
+            == "call {{fn() {ok} end}} here"
+        )
+
     def test_jira_mentions_preserved(self, preprocessor):
         markdown = "Ping [~jsmith] and [~accountid:abc-123] about this."
         result = preprocessor.markdown_to_jira(markdown)

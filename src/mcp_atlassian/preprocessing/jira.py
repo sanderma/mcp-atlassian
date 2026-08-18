@@ -11,6 +11,7 @@ Both directions fall back to returning the input text unchanged if the
 underlying parser raises, so a conversion bug never destroys content.
 """
 
+import html
 import logging
 import re
 from collections.abc import Callable
@@ -19,7 +20,8 @@ from typing import Any
 
 from jira2markdown import convert as _jira2markdown_convert
 from jira2markdown.elements import MarkupElements
-from jira2markdown.markup.advanced import Code
+from jira2markdown.markup.advanced import Code, Noformat
+from jira2markdown.markup.text_effects import Monospaced
 from mistletoe.block_token import Document
 from mistletoe.contrib import jira_renderer as jira_renderer_module
 from mistletoe.contrib.jira_renderer import JiraRenderer
@@ -34,17 +36,58 @@ logger = logging.getLogger("mcp-atlassian")
 _WIKI_PARSER_MAX_CHARS = 20_000
 
 
+def _fence_for(content: str) -> str:
+    """Return a backtick fence longer than any run inside the content."""
+    longest = max((len(m) for m in re.findall(r"`+", content)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 class _CodeBlock(Code):
-    """{code} conversion without jira2markdown's "Java" default language."""
+    """{code} conversion without jira2markdown's "Java" default language.
+
+    Also sizes the fence to exceed any backtick run in the content, so
+    code that itself contains ``` does not terminate the fence early.
+    """
 
     def action(self, tokens: ParseResults) -> str:
         lang = (tokens.lang or "").lower()
         text = tokens.text.strip("\n")
-        return f"```{lang}\n{text}\n```"
+        fence = _fence_for(text)
+        return f"{fence}{lang}\n{text}\n{fence}"
+
+
+class _Noformat(Noformat):
+    """{noformat} conversion with a content-aware fence length."""
+
+    def action(self, tokens: ParseResults) -> str:
+        text = tokens.text.strip("\n")
+        fence = _fence_for(text)
+        return f"{fence}\n{text}\n{fence}"
+
+
+class _Monospaced(Monospaced):
+    """{{...}} conversion emitting valid spans for backtick content.
+
+    Decodes HTML entities (the write direction encodes special
+    characters that way, and Jira displays them decoded), so a round
+    trip yields the characters the author wrote.
+    """
+
+    def action(self, tokens: ParseResults) -> str:
+        content = html.unescape(str(tokens[0]))
+        if "`" not in content:
+            return f"`{content}`"
+        longest = max(len(m) for m in re.findall(r"`+", content))
+        delim = "`" * (longest + 1)
+        # CommonMark strips one leading/trailing space pad, which is
+        # required when the content starts or ends with a backtick
+        return f"{delim} {content} {delim}"
 
 
 _WIKI_ELEMENTS = MarkupElements()
 _WIKI_ELEMENTS.replace(Code, _CodeBlock)
+_WIKI_ELEMENTS.replace(Noformat, _Noformat)
+_WIKI_ELEMENTS.replace(Monospaced, _Monospaced)
 
 
 @lru_cache(maxsize=128)
@@ -73,6 +116,31 @@ _ISSUE_KEY_PATTERN = r"[A-Z][A-Z0-9_]+-\d+(?:-\d+)*"
 
 _LIST_ITEM_RE = re.compile(r"^(\s*)((?:[-+*]|\d{1,9}[.)])\s+)(\S.*)$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+
+def _protect_pipes_in_code_spans(text: str) -> str:
+    """Escape pipes inside backtick spans on table rows as ``\\|``.
+
+    GFM splits table cells on ``|`` before inline parsing, so a pipe
+    inside a code span breaks the span apart unless written as ``\\|``
+    (which the parser folds back to a literal pipe).  Agents rarely
+    know this, so it is applied for them.  Fenced code is left alone.
+    """
+    lines = text.split("\n")
+    in_fence = False
+    result: list[str] = []
+    for line in lines:
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and line.lstrip().startswith("|") and "`" in line:
+            line = _CODE_SPAN_RE.sub(
+                lambda m: m.group(0).replace("\\|", "|").replace("|", "\\|"),
+                line,
+            )
+        result.append(line)
+    return "\n".join(result)
+
 
 # Inline HTML formatting tags mapped to Jira text-effect markers.
 # The same marker opens and closes the effect.
@@ -339,6 +407,7 @@ class JiraMarkupRenderer(JiraRenderer):
         super().__init__(*extras)
         self.normalize_language = normalize_language
         self._span_color_stack: list[bool] = []
+        self._table_cell_depth = 0
 
     # Jira's emphasis engine triggers *bold* and _italic_ even inside
     # words (the classic "snake_case turns italic" problem), so those
@@ -387,18 +456,42 @@ class JiraMarkupRenderer(JiraRenderer):
                     result.append("\\" + char)
                     continue
             result.append(char)
-        return "".join(result)
+        text = "".join(result)
+        if self._table_cell_depth and "|" in text:
+            # A literal pipe inside a Jira table cell splits the cell;
+            # backslash-escaping does not work there, the HTML entity
+            # is the documented workaround.
+            text = text.replace("|", "&#124;")
+        return text
+
+    # Jira's {{...}} monospace is a text effect, not a literal span:
+    # macros ({panel}), emphasis (*b*), strikes (-b-), links ([a|b]),
+    # images (!u!) and citations (??c??) all still execute inside it,
+    # and backslash escapes there render as literal backslashes.  HTML
+    # entities are the only representation that survives — verified
+    # against Jira DC 10.3's wiki renderer.  Order matters: "&" first,
+    # so pre-existing entity-looking content stays literal.
+    _MONO_ENTITIES = {
+        "&": "&#38;",
+        "{": "&#123;",
+        "}": "&#125;",
+        "[": "&#91;",
+        "]": "&#93;",
+        "*": "&#42;",
+        "_": "&#95;",
+        "-": "&#45;",
+        "+": "&#43;",
+        "^": "&#94;",
+        "~": "&#126;",
+        "|": "&#124;",
+        "!": "&#33;",
+        "?": "&#63;",
+    }
 
     def render_inline_code(self, token: Any) -> str:
-        # Jira renders {{...}} content literally; backslash escapes
-        # inserted by render_raw_text would show up verbatim.
         content = token.children[0].content
-        # Content starting or ending with a brace would merge with the
-        # {{ }} delimiters into {{{...}}}, which Jira's renderer cannot
-        # disambiguate; pad with spaces to keep the delimiters intact
-        # (issue #1 on this fork).
-        if content and (content[0] in "{}" or content[-1] in "{}"):
-            content = f" {content} "
+        for char, entity in self._MONO_ENTITIES.items():
+            content = content.replace(char, entity)
         return "{{" + content + "}}"
 
     def render_block_code(self, token: Any) -> str:
@@ -441,7 +534,15 @@ class JiraMarkupRenderer(JiraRenderer):
 
     def render_table_cell(self, token: Any, in_header: bool = False) -> str:
         template = "||{inner}" if in_header else "|{inner}"
-        inner = self.render_inner(token).replace("|", "\\|")
+        # Literal pipes are converted to &#124; where they are rendered
+        # (raw text, inline code), so structural pipes emitted by
+        # render_link ([text|url]) survive here untouched — the stock
+        # renderer's blanket pipe-escape broke links inside cells.
+        self._table_cell_depth += 1
+        try:
+            inner = self.render_inner(token)
+        finally:
+            self._table_cell_depth -= 1
         # A raw newline (from a hard break or <br>) ends the table row;
         # Jira's in-cell line break is "\\" without a newline.
         inner = re.sub(r"(?:\\\\)?\n", r" \\\\ ", inner).strip()
@@ -867,6 +968,7 @@ class JiraPreprocessor(BasePreprocessor):
             flags=re.MULTILINE,
         )
 
+        output = _protect_pipes_in_code_spans(output)
         output = _normalize_list_indentation(output)
 
         with JiraMarkupRenderer(

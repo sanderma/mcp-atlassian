@@ -881,11 +881,15 @@ def test_markdown_to_jira_word_boundary_underscore_still_italicizes(
     assert preprocessor_with_jira.markdown_to_jira("__bold text__") == "*bold text*"
 
 
-def test_markdown_to_jira_underscore_in_inline_code_untouched(preprocessor_with_jira):
-    """Underscores inside inline code spans stay inside monospace, unescaped."""
+def test_markdown_to_jira_underscore_in_inline_code_entity(preprocessor_with_jira):
+    """Underscores in inline code become entities ({{_}} would italicize).
+
+    Jira applies text effects inside {{...}}, so special characters are
+    entity-encoded; the rendered issue shows the original text.
+    """
     assert (
         preprocessor_with_jira.markdown_to_jira("call `find_provider_by_url` now")
-        == "call {{find_provider_by_url}} now"
+        == "call {{find&#95;provider&#95;by&#95;url}} now"
     )
 
 
@@ -978,7 +982,8 @@ def test_markdown_to_jira_inline_code_preserves_hash(preprocessor_with_jira):
     markdown = "The shebang line is `#!/bin/bash` in shell scripts."
     result = preprocessor_with_jira.markdown_to_jira(markdown)
 
-    assert "#!/bin/bash" in result
+    # "!" is entity-encoded inside {{...}}; Jira renders "#!/bin/bash"
+    assert "{{#&#33;/bin/bash}}" in result
     assert "h1." not in result
 
 
@@ -1757,41 +1762,48 @@ class TestMarkdownToJiraParser:
         result = preprocessor.markdown_to_jira("the foo_bar_baz identifier")
         assert "foo\\_bar\\_baz" in result
 
-    def test_inline_code_content_not_escaped(self, preprocessor):
+    def test_inline_code_specials_entity_encoded(self, preprocessor):
+        """Jira runs text effects inside {{...}}; entities keep content
+        literal (renders as: my_var --dry-run)."""
         result = preprocessor.markdown_to_jira("run `my_var --dry-run` now")
-        assert "{{my_var --dry-run}}" in result
+        assert "{{my&#95;var &#45;&#45;dry&#45;run}}" in result
 
     def test_inline_code_with_leading_brace(self, preprocessor):
-        """Inline code starting with { must not produce triple braces."""
+        """Macro braces in inline code become entities (issue #1).
+
+        Verified against Jira DC 10.3: space-padding ({{ {panel} }})
+        renders literal outer braces AND executes the macro; only the
+        entity form renders as monospace "{panel}".
+        """
         assert (
             preprocessor.markdown_to_jira("use `{panel}` here")
-            == "use {{ {panel} }} here"
+            == "use {{&#123;panel&#125;}} here"
         )
 
     def test_inline_code_with_trailing_brace(self, preprocessor):
-        """Inline code ending with } must not produce triple braces."""
         assert (
             preprocessor.markdown_to_jira("use `{code:go}` here")
-            == "use {{ {code:go} }} here"
+            == "use {{&#123;code:go&#125;}} here"
         )
 
     def test_inline_code_with_double_braces(self, preprocessor):
-        """Inline code with {{...}} content must not produce quad braces."""
         assert (
             preprocessor.markdown_to_jira("set `{{.Values.x}}` here")
-            == "set {{ {{.Values.x}} }} here"
+            == "set {{&#123;&#123;.Values.x&#125;&#125;}} here"
         )
 
-    def test_inline_code_without_braces_unchanged(self, preprocessor):
-        """Inline code without leading/trailing braces must not be padded."""
+    def test_inline_code_without_specials_unchanged(self, preprocessor):
+        """Alphanumeric inline code is emitted without any encoding."""
         assert (
-            preprocessor.markdown_to_jira("use `customfield_10101` here")
-            == "use {{customfield_10101}} here"
+            preprocessor.markdown_to_jira("use `getStatusById` here")
+            == "use {{getStatusById}} here"
         )
-        # Braces only in the middle keep the delimiters unambiguous
+
+    def test_inline_code_mid_braces_also_encoded(self, preprocessor):
+        """Even mid-content {x} splits the monospace span in Jira."""
         assert (
             preprocessor.markdown_to_jira("call `fn() {ok} end` here")
-            == "call {{fn() {ok} end}} here"
+            == "call {{fn() &#123;ok&#125; end}} here"
         )
 
     def test_jira_mentions_preserved(self, preprocessor):
@@ -1844,6 +1856,38 @@ class TestMarkdownToJiraParser:
         """A pipe in link text would be parsed as the alias separator."""
         result = preprocessor.markdown_to_jira("[a|b](https://x.test)")
         assert "[a&#124;b|https://x.test]" in result
+
+    def test_inline_code_with_pipe_in_table(self, preprocessor):
+        """Inline code containing | in a table cell converts to {{...}}."""
+        md = "| Status | Criteria |\n|---|---|\n| (?) | `[text|url]` test |"
+        result = preprocessor.markdown_to_jira(md)
+        assert "{{&#91;text&#124;url&#93;}}" in result
+        assert "`" not in result
+        # The row keeps exactly two cells
+        assert "|(?)|{{&#91;text&#124;url&#93;}} test|" in result
+
+    def test_pre_escaped_pipe_in_table_code_span(self, preprocessor):
+        """A GFM-correct \\| inside a cell's code span works the same."""
+        md = "| S | C |\n|---|---|\n| x | `[a\\|b]` w |"
+        result = preprocessor.markdown_to_jira(md)
+        assert "{{&#91;a&#124;b&#93;}}" in result
+
+    def test_literal_pipe_in_table_cell_text(self, preprocessor):
+        """Escaped pipes in plain cell text become the HTML entity."""
+        md = "| S | C |\n|---|---|\n| x | a\\|b |"
+        result = preprocessor.markdown_to_jira(md)
+        assert "|x|a&#124;b|" in result
+
+    def test_link_inside_table_cell_keeps_structural_pipe(self, preprocessor):
+        """The [text|url] separator must not be escaped inside cells."""
+        md = "| S | C |\n|---|---|\n| x | [doc](https://x.test/p) |"
+        result = preprocessor.markdown_to_jira(md)
+        assert "[doc|https://x.test/p]" in result
+
+    def test_pipe_in_code_span_outside_table(self, preprocessor):
+        """Pipes in inline code are entity-encoded (renders as a|b)."""
+        result = preprocessor.markdown_to_jira("run `a|b` now")
+        assert "{{a&#124;b}}" in result
 
     def test_image_without_alt_text(self, preprocessor):
         result = preprocessor.markdown_to_jira("![](https://x.test/d.png)")

@@ -2018,3 +2018,50 @@ class TestCleanJiraTextStructure:
         assert "# Second step" in back
         assert "{code:python}" in back
         assert "||Col A||Col B||" in back
+
+
+class TestRendererValidatedEscaping:
+    """Regressions for behaviors validated against a live Jira DC 10.3.
+
+    Rendered-HTML evidence lives in tests/e2e/test_markup_rendering_dc.py;
+    these pin the exact markup those behaviors rely on.
+    """
+
+    @pytest.fixture
+    def preprocessor(self):
+        return JiraPreprocessor(base_url="https://example.atlassian.net")
+
+    def test_braces_in_prose_become_entities(self, preprocessor):
+        """Backslash escapes fail on {{doubled}} braces and spaced
+        braces split the paragraph; entities render correctly."""
+        result = preprocessor.markdown_to_jira("config {json} and {{tpl}} values")
+        assert result == (
+            "config &#123;json&#125; and &#123;&#123;tpl&#125;&#125; values"
+        )
+
+    def test_intraword_emphasis_restored_as_literal_text(self, preprocessor):
+        """CommonMark parses 2*3*4 as emphasis; Jira cannot render
+        intraword effects, so the author's characters are restored."""
+        result = preprocessor.markdown_to_jira("2*3*4 = 24")
+        assert result == "2&#42;3&#42;4 = 24"
+        result = preprocessor.markdown_to_jira("2**3**4 = x")
+        assert result == "2&#42;&#42;3&#42;&#42;4 = x"
+
+    def test_boundary_emphasis_still_converts(self, preprocessor):
+        assert preprocessor.markdown_to_jira("a *b* c") == "a _b_ c"
+        assert preprocessor.markdown_to_jira("a **b** c") == "a *b* c"
+
+    def test_bare_url_passes_through_unescaped(self, preprocessor):
+        """Jira autolinks bare URLs; injected escapes corrupt them."""
+        result = preprocessor.markdown_to_jira("see https://x.test/a_b_c today")
+        assert "https://x.test/a_b_c" in result
+        assert "\\_" not in result
+
+    def test_bare_url_braces_percent_encoded(self, preprocessor):
+        """Jira macro-parses raw braces even inside URLs."""
+        result = preprocessor.markdown_to_jira("see https://x.test/a{c} now")
+        assert "https://x.test/a%7Bc%7D" in result
+
+    def test_link_target_not_touched_by_emphasis_repair(self, preprocessor):
+        result = preprocessor.markdown_to_jira("[doc](https://x.test/a_b_c)")
+        assert result == "[doc|https://x.test/a_b_c]"

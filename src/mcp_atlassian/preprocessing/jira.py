@@ -119,6 +119,49 @@ _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
 
 
+_CODE_MACRO_BLOCK_RE = (
+    r"\{code[^}]*\}[\s\S]*?\{code\}|\{noformat[^}]*\}[\s\S]*?\{noformat\}"
+)
+_BARE_URL_RE = re.compile(r"https?://\S+")
+_INTRAWORD_EM_RE = re.compile(r"(?<=\w)_([^_\s\n](?:[^_\n]*[^_\s\n])?)_(?=\w)")
+_INTRAWORD_STRONG_RE = re.compile(r"(?<=\w)\*([^*\s\n](?:[^*\n]*[^*\s\n])?)\*(?=\w)")
+
+
+# Spans the emphasis repair must never rewrite: code blocks, inline
+# monospace, [links|with/url_targets], !image/urls!, and bare URLs.
+_EMPHASIS_REPAIR_PROTECTED_RE = (
+    _CODE_MACRO_BLOCK_RE
+    + r"|\{\{[^\n]*?\}\}"
+    + r"|\[[^\]\n]*\]"
+    + r"|![^\s!|]+(?:\|[^!\n]*)?!"
+    + r"|https?://\S+"
+)
+
+
+def _repair_intraword_emphasis(markup: str) -> str:
+    """Turn unrenderable intraword emphasis back into literal text.
+
+    CommonMark lets ``*`` open emphasis inside a word (``2*3*4`` parses
+    as 2<em>3</em>4), but Jira's effects need word boundaries, so the
+    rendered ``2_3_4`` would display those literal underscores — silent
+    text corruption.  Since Jira cannot express intraword emphasis at
+    all, restore the author's asterisks as entities, which display
+    verbatim.  Escaped underscores (``foo\\_bar``) are preceded by a
+    backslash, so the word-boundary lookbehind skips them.
+    """
+    blocks: list[str] = []
+    text = _extract_blocks(
+        markup,
+        _EMPHASIS_REPAIR_PROTECTED_RE,
+        lambda m: m.group(0),
+        blocks,
+        "EMPHFIX",
+    )
+    text = _INTRAWORD_EM_RE.sub(r"&#42;\1&#42;", text)
+    text = _INTRAWORD_STRONG_RE.sub(r"&#42;&#42;\1&#42;&#42;", text)
+    return _restore_blocks(text, blocks, "EMPHFIX")
+
+
 def _protect_pipes_in_code_spans(text: str) -> str:
     """Escape pipes inside backtick spans on table rows as ``\\|``.
 
@@ -410,13 +453,17 @@ class JiraMarkupRenderer(JiraRenderer):
         self._table_cell_depth = 0
 
     # Jira's emphasis engine triggers *bold* and _italic_ even inside
-    # words (the classic "snake_case turns italic" problem), so those
-    # two are escaped whenever they touch non-whitespace.  The other
-    # text effects (-strike-, +ins+, ^sup^, ~sub~) only matter at word
-    # boundaries, and macros/links ({...}, [...]) trigger anywhere.
+    # words on some versions (the classic "snake_case turns italic"
+    # problem), so those two are escaped whenever they touch
+    # non-whitespace.  The other text effects (-strike-, +ins+, ^sup^,
+    # ~sub~) only matter at word boundaries, and links ([...]) trigger
+    # anywhere.  Braces are special-cased below: backslash escapes fail
+    # on doubled braces ("\{\{x\}\}" still becomes monospace) and bare
+    # "{ x }" splits the paragraph, so braces always become entities.
     _EMPHASIS_CHARS = frozenset("*_")
     _BOUNDARY_EFFECT_CHARS = frozenset("+^~-")
-    _MACRO_CHARS = frozenset("{}[]")
+    _MACRO_CHARS = frozenset("[]")
+    _BRACE_ENTITIES = {"{": "&#123;", "}": "&#125;"}
 
     def render_raw_text(self, token: Any, escape: bool = True) -> str:
         """Escape Jira markup characters where Jira would interpret them.
@@ -432,17 +479,49 @@ class JiraMarkupRenderer(JiraRenderer):
 
         text = token.content
         length = len(text)
-        if length == 1 and text in (
-            self._EMPHASIS_CHARS | self._BOUNDARY_EFFECT_CHARS | self._MACRO_CHARS
-        ):
-            return "\\" + text
+        if length == 1:
+            if text in self._BRACE_ENTITIES:
+                return self._BRACE_ENTITIES[text]
+            if text in (
+                self._EMPHASIS_CHARS | self._BOUNDARY_EFFECT_CHARS | self._MACRO_CHARS
+            ):
+                return "\\" + text
 
+        # Bare URLs are autolinked by Jira; injected escapes would
+        # corrupt them, so they pass through verbatim.
+        if "://" in text:
+            parts: list[str] = []
+            last = 0
+            for m in _BARE_URL_RE.finditer(text):
+                parts.append(self._escape_segment(text[last : m.start()]))
+                # Jira macro-parses braces even inside URLs (splitting
+                # the paragraph) and does not decode entities there;
+                # percent-encoding is the one valid representation
+                url = m.group(0).replace("{", "%7B").replace("}", "%7D")
+                parts.append(url)
+                last = m.end()
+            parts.append(self._escape_segment(text[last:]))
+            escaped = "".join(parts)
+        else:
+            escaped = self._escape_segment(text)
+        if self._table_cell_depth and "|" in escaped:
+            # A literal pipe inside a Jira table cell splits the cell;
+            # backslash-escaping does not work there, the HTML entity
+            # is the documented workaround.
+            escaped = escaped.replace("|", "&#124;")
+        return escaped
+
+    def _escape_segment(self, text: str) -> str:
+        length = len(text)
         result: list[str] = []
         for i, char in enumerate(text):
             prev = text[i - 1] if i > 0 else ""
             nxt = text[i + 1] if i < length - 1 else ""
             prev_solid = bool(prev) and not prev.isspace()
             next_solid = bool(nxt) and not nxt.isspace()
+            if char in self._BRACE_ENTITIES:
+                result.append(self._BRACE_ENTITIES[char])
+                continue
             if char in self._MACRO_CHARS or char in self._EMPHASIS_CHARS:
                 if prev_solid or next_solid:
                     result.append("\\" + char)
@@ -456,13 +535,7 @@ class JiraMarkupRenderer(JiraRenderer):
                     result.append("\\" + char)
                     continue
             result.append(char)
-        text = "".join(result)
-        if self._table_cell_depth and "|" in text:
-            # A literal pipe inside a Jira table cell splits the cell;
-            # backslash-escaping does not work there, the HTML entity
-            # is the documented workaround.
-            text = text.replace("|", "&#124;")
-        return text
+        return "".join(result)
 
     # Jira's {{...}} monospace is a text effect, not a literal span:
     # macros ({panel}), emphasis (*b*), strikes (-b-), links ([a|b]),
@@ -977,6 +1050,7 @@ class JiraPreprocessor(BasePreprocessor):
             output = renderer.render(Document(output))
 
         output = output.rstrip("\n")
+        output = _repair_intraword_emphasis(output)
         output = _restore_blocks(output, jira_lists, "JIRALIST")
         output = _restore_blocks(output, mentions, "JIRAMENTION")
         return output

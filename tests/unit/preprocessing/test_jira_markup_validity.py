@@ -120,8 +120,7 @@ CORPUS = [
         id="headings-and-tasks",
     ),
     pytest.param(
-        "````\nouter fence with ``` inside\n````\n\n"
-        "Text `` code with ` tick `` end",
+        "````\nouter fence with ``` inside\n````\n\nText `` code with ` tick `` end",
         id="nested-backticks",
     ),
 ]

@@ -189,6 +189,49 @@ def test_rendered_html_matches_expectations(
         assert fragment not in html, f"forbidden {fragment!r} in rendered HTML: {html}"
 
 
+# (id, markdown, html tag to inspect, text a browser must display in it)
+VISIBLE_TEXT = [
+    ("mono-macro-braces", "use `{panel}` here", "tt", "{panel}"),
+    ("mono-specials", "run `my_var --dry-run` now", "tt", "my_var --dry-run"),
+    ("mono-math", "then `2*3*4` stays", "tt", "2*3*4"),
+    (
+        "mono-pipe-in-table",
+        "| a | b |\n|---|---|\n| `[text|url]` | x |",
+        "tt",
+        "[text|url]",
+    ),
+    ("link-pipe-text", "[a|b](https://x.test)", "a", "a|b"),
+]
+
+
+@pytest.mark.parametrize(
+    "markdown, tag, visible",
+    [pytest.param(m, t, v, id=i) for i, m, t, v in VISIBLE_TEXT],
+)
+def test_visible_text_matches_what_author_wrote(
+    jira_render_session: tuple[requests.Session, str],
+    preprocessor: JiraPreprocessor,
+    markdown: str,
+    tag: str,
+    visible: str,
+) -> None:
+    """The characters a browser displays must equal the author's text.
+
+    Raw-HTML fragment checks can't tell whether ``&#123;`` will decode;
+    parsing the rendered HTML and comparing element text reproduces
+    exactly what the browser shows (verified once against a Playwright
+    screenshot of the real issue view).
+    """
+    from bs4 import BeautifulSoup
+
+    html_out = render_markdown(jira_render_session, preprocessor, markdown)
+    soup = BeautifulSoup(html_out, "html.parser")
+    texts = [el.get_text() for el in soup.find_all(tag)]
+    assert visible in texts, f"{visible!r} not displayed; {tag} texts: {texts}"
+    # No double-encoded entity may remain visible anywhere
+    assert "&#" not in soup.get_text(), soup.get_text()
+
+
 def test_rendered_issue_description_round_trip(
     jira_render_session: tuple[requests.Session, str],
     preprocessor: JiraPreprocessor,

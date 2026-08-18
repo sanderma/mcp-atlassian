@@ -35,7 +35,22 @@ PROJECT_KEY_PATTERN = r"^[A-Z][A-Z0-9_]+$"
 
 jira_mcp = FastMCP(
     name="Jira MCP Service",
-    instructions="Provides tools for interacting with Atlassian Jira.",
+    instructions=(
+        "Provides tools for interacting with Atlassian Jira.\n\n"
+        "Formatting: write all rich-text content (descriptions, comments, "
+        "worklog and transition comments) in standard Markdown (GFM). The "
+        "server converts it to the correct Jira representation "
+        "automatically. Do NOT write Jira wiki markup yourself (no "
+        "{code}/{quote}/{color} macros, no h1./h2. headings, no || table "
+        "headers, no *bold*/_italic_ wiki effects) - sending wiki markup "
+        "through the Markdown converter corrupts it. Special characters in "
+        "ordinary text need no escaping; the server handles Jira's escaping "
+        "rules. Two Jira-specific forms are passed through as-is and safe "
+        "to use inside Markdown: user mentions like [~username] and issue "
+        "keys like PROJ-123.\n\n"
+        "Rich-text fields returned by read tools (descriptions, comments) "
+        "have already been converted from Jira's format to Markdown."
+    ),
 )
 
 
@@ -1338,7 +1353,13 @@ async def create_issue(
     ] = None,
     description: Annotated[
         str | None,
-        Field(description="Issue description in Markdown format", default=None),
+        Field(
+            description=(
+                "Issue description in Markdown format (not Jira wiki "
+                "markup; the server converts automatically)"
+            ),
+            default=None,
+        ),
     ] = None,
     components: Annotated[
         str | None,
@@ -1738,7 +1759,15 @@ async def add_comment(
             pattern=ISSUE_KEY_PATTERN,
         ),
     ],
-    body: Annotated[str, Field(description="Comment text in Markdown format")],
+    body: Annotated[
+        str,
+        Field(
+            description=(
+                "Comment text in Markdown format (not Jira wiki markup; "
+                "the server converts automatically)"
+            )
+        ),
+    ],
     visibility: Annotated[
         str | None,
         Field(

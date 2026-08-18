@@ -1,16 +1,98 @@
-"""Jira-specific text preprocessing module."""
+"""Jira-specific text preprocessing module.
+
+Converts between Jira wiki markup (Server/DC and Cloud API v2) and
+Markdown using real parsers instead of regex chains:
+
+- Jira wiki markup -> Markdown: ``jira2markdown`` (pyparsing grammar)
+- Markdown -> Jira wiki markup: ``mistletoe`` with a customized
+  :class:`~mistletoe.contrib.jira_renderer.JiraRenderer`
+
+Both directions fall back to returning the input text unchanged if the
+underlying parser raises, so a conversion bug never destroys content.
+"""
 
 import logging
 import re
+from collections.abc import Callable
+from functools import lru_cache
 from typing import Any
+
+from jira2markdown import convert as _jira2markdown_convert
+from jira2markdown.elements import MarkupElements
+from jira2markdown.markup.advanced import Code
+from mistletoe.block_token import Document
+from mistletoe.contrib.jira_renderer import JiraRenderer
+from pyparsing import ParseResults
 
 from .base import BasePreprocessor, _extract_blocks, _restore_blocks
 
 logger = logging.getLogger("mcp-atlassian")
 
+# jira2markdown's pyparsing grammar costs roughly 0.25 ms per character;
+# above this size the simpler regex fallback keeps latency bounded.
+_WIKI_PARSER_MAX_CHARS = 20_000
+
+
+class _CodeBlock(Code):
+    """{code} conversion without jira2markdown's "Java" default language."""
+
+    def action(self, tokens: ParseResults) -> str:
+        lang = (tokens.lang or "").lower()
+        text = tokens.text.strip("\n")
+        return f"```{lang}\n{text}\n```"
+
+
+_WIKI_ELEMENTS = MarkupElements()
+_WIKI_ELEMENTS.replace(Code, _CodeBlock)
+
+
+@lru_cache(maxsize=128)
+def _convert_wiki_cached(text: str) -> str:
+    """Convert Jira wiki markup to Markdown, memoized.
+
+    Issue descriptions are converted repeatedly across get/search
+    calls; the conversion is pure, so caching is safe.
+    """
+    return _jira2markdown_convert(text, elements=_WIKI_ELEMENTS)
+
+
+# Lines using Jira's own nested-list syntax (e.g. "** item", "*# item").
+# Agents sometimes send Jira markup directly; these lines are not valid
+# Markdown constructs, so they are preserved verbatim (issue #786).
+# Pure "#"-runs are excluded: "## text" is a Markdown heading.
+_JIRA_NESTED_LIST_RE = r"^(?!#+ )[*#]{2,} .*$"
+
+# Jira user mentions like [~username] or [~accountid:...] must survive
+# Markdown parsing untouched.
+_JIRA_MENTION_RE = r"\[~[^\]\n]+\]"
+
+_LIST_ITEM_RE = re.compile(r"^(\s*)((?:[-+*]|\d{1,9}[.)])\s+)(\S.*)$")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+# Inline HTML formatting tags mapped to Jira text-effect markers.
+# The same marker opens and closes the effect.
+_HTML_TAG_MARKERS = {
+    "cite": "??",
+    "q": "??",
+    "del": "-",
+    "s": "-",
+    "strike": "-",
+    "ins": "+",
+    "u": "+",
+    "sup": "^",
+    "sub": "~",
+    "b": "*",
+    "strong": "*",
+    "i": "_",
+    "em": "_",
+}
+
+_HTML_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s[^>]*?)?)/?>")
+_COLOR_ATTR_RE = re.compile(r"color\s*[:=]\s*[\"']?(#?\w+)")
+
 
 def _convert_panel(params: str | None, content: str) -> str:
-    """Convert a Jira {panel} block to markdown."""
+    """Convert a Jira {panel} block to markdown (regex fallback path)."""
     title = ""
     if params:
         title_match = re.search(r"title=([^|}]+)", params)
@@ -20,6 +102,353 @@ def _convert_panel(params: str | None, content: str) -> str:
     if title:
         return f"\n**{title}**\n{content}\n"
     return f"\n{content}\n"
+
+
+def _convert_jira_list_line(match: re.Match[str]) -> str:
+    """Convert one Jira list line to Markdown (regex fallback path)."""
+    jira_bullets = match.group(1)
+    content = match.group(2)
+    indent = " " * ((len(jira_bullets) - 1) * 2)
+    prefix = "1." if jira_bullets[-1] == "#" else "-"
+    return f"{indent}{prefix} {content}"
+
+
+def _regex_jira_to_markdown(input_text: str) -> str:
+    """Convert Jira wiki markup to Markdown with regex heuristics.
+
+    Fallback used when the input is too large for the pyparsing-based
+    converter or when that converter raises.  Less accurate than
+    ``jira2markdown`` but fast and linear.
+    """
+    output = input_text
+
+    # Protect code/noformat/inline-code blocks from downstream
+    # transformations by replacing them with placeholders.
+    code_blocks: list[str] = []
+    inline_codes: list[str] = []
+
+    def _jira_code_to_md(match: re.Match[str]) -> str:
+        lang = match.group(1) or ""
+        content = match.group(2)
+        return f"```{lang}\n{content}\n```"
+
+    output = _extract_blocks(
+        output,
+        r"\{code(?::([a-z]+))?\}([\s\S]*?)\{code\}",
+        _jira_code_to_md,
+        code_blocks,
+        "CODEBLOCK",
+        flags=re.MULTILINE,
+    )
+    output = _extract_blocks(
+        output,
+        r"\{noformat\}([\s\S]*?)\{noformat\}",
+        lambda m: f"```\n{m.group(1)}\n```",
+        code_blocks,
+        "CODEBLOCK",
+    )
+    output = _extract_blocks(
+        output,
+        r"\{\{([^}]+)\}\}",
+        lambda m: f"`{m.group(1)}`",
+        inline_codes,
+        "INLINECODE",
+    )
+
+    # Block quotes
+    output = re.sub(r"^bq\.(.*?)$", r"> \1\n", output, flags=re.MULTILINE)
+
+    # Text formatting (bold, italic)
+    output = re.sub(
+        r"([*_])(.*?)\1",
+        lambda match: ("**" if match.group(1) == "*" else "*")
+        + match.group(2)
+        + ("**" if match.group(1) == "*" else "*"),
+        output,
+    )
+
+    # Multi-level lists
+    output = re.sub(
+        r"^((?:#|-|\+|\*)+) (.*)$",
+        _convert_jira_list_line,
+        output,
+        flags=re.MULTILINE,
+    )
+
+    # Headers
+    output = re.sub(
+        r"^h([0-6])\.(.*)$",
+        lambda match: "#" * int(match.group(1)) + match.group(2),
+        output,
+        flags=re.MULTILINE,
+    )
+
+    # Citation (non-overlapping alternation to avoid catastrophic backtracking)
+    output = re.sub(r"\?\?([^?]+(?:\?[^?]+)*)\?\?", r"<cite>\1</cite>", output)
+
+    # Inserted text
+    output = re.sub(r"\+([^+]*)\+", r"<ins>\1</ins>", output)
+
+    # Superscript
+    output = re.sub(r"\^([^^]*)\^", r"<sup>\1</sup>", output)
+
+    # Subscript
+    output = re.sub(r"~([^~]*)~", r"<sub>\1</sub>", output)
+
+    # Quote blocks
+    output = re.sub(
+        r"\{quote\}([\s\S]*)\{quote\}",
+        lambda match: "\n".join([f"> {line}" for line in match.group(1).split("\n")]),
+        output,
+        flags=re.MULTILINE,
+    )
+
+    # Panel blocks - extract content, optionally show title as bold
+    output = re.sub(
+        r"\{panel(?::([^}]*))?\}([\s\S]*?)\{panel\}",
+        lambda match: _convert_panel(match.group(1), match.group(2)),
+        output,
+        flags=re.MULTILINE,
+    )
+
+    # Images with alt text
+    output = re.sub(
+        r"!([^|\n\s]+)\|([^\n!]*)alt=([^\n!\,]+?)(,([^\n!]*))?!",
+        r"![\3](\1)",
+        output,
+    )
+
+    # Images with other parameters (ignore them)
+    output = re.sub(r"!([^|\n\s]+)\|([^\n!]*)!", r"![](\1)", output)
+
+    # Images without parameters
+    output = re.sub(r"!([^\n\s!]+)!", r"![](\1)", output)
+
+    # Links
+    output = re.sub(r"\[([^|]+)\|(.+?)\]", r"[\1](\2)", output)
+    output = re.sub(r"\[(.+?)\]([^\(])", r"\1\2", output)
+
+    # Colored text
+    output = re.sub(
+        r"\{color:([^}]+)\}([\s\S]*?)\{color\}",
+        r"<span style=\"color:\1\">\2</span>",
+        output,
+        flags=re.MULTILINE,
+    )
+
+    # Convert Jira table headers (||) to markdown table format
+    lines = output.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if "||" in line:
+            lines[i] = line.replace("||", "|")
+            header_cells = lines[i].count("|") - 1
+            if header_cells > 0:
+                separator_line = "|" + "---|" * header_cells
+                lines.insert(i + 1, separator_line)
+                i += 1
+        i += 1
+    output = "\n".join(lines)
+
+    # Restore code/noformat blocks and inline code
+    output = _restore_blocks(output, code_blocks, "CODEBLOCK")
+    output = _restore_blocks(output, inline_codes, "INLINECODE")
+
+    return output
+
+
+def _normalize_list_indentation(text: str) -> str:
+    """Normalize list indentation to CommonMark-required columns.
+
+    Agents commonly indent nested lists with two spaces per level
+    (e.g. ``1. a\\n  1. b``).  CommonMark requires a nested item to be
+    indented to the parent's content column (three columns for
+    ``1. ``), so a strict parser flattens such lists.  This pass
+    re-indents list-item lines so each intended level starts at its
+    parent's content column, leaving fenced code untouched.
+    """
+    lines = text.split("\n")
+    result: list[str] = []
+    # Stack of (original_indent, normalized_indent, content_column)
+    stack: list[tuple[int, int, int]] = []
+    in_fence = False
+
+    for line in lines:
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            result.append(line)
+            continue
+        if in_fence:
+            result.append(line)
+            continue
+
+        match = _LIST_ITEM_RE.match(line)
+        if not match:
+            # Blank lines and indented continuations keep list context;
+            # flush it on any other unindented text.
+            if line.strip() and not line.startswith(" "):
+                stack = []
+            result.append(line)
+            continue
+
+        indent = len(match.group(1).expandtabs(4))
+        marker = match.group(2)
+        content = match.group(3)
+
+        while stack and indent < stack[-1][0]:
+            stack.pop()
+
+        if stack and indent == stack[-1][0]:
+            norm = stack[-1][1]
+            stack[-1] = (indent, norm, norm + len(marker))
+        elif stack and indent > stack[-1][0]:
+            norm = stack[-1][2]
+            stack.append((indent, norm, norm + len(marker)))
+        else:
+            norm = indent
+            stack.append((indent, norm, norm + len(marker)))
+
+        result.append(" " * norm + marker + content)
+
+    return "\n".join(result)
+
+
+class JiraMarkupRenderer(JiraRenderer):
+    """Markdown -> Jira wiki markup renderer with MCP-specific fixes.
+
+    Extends mistletoe's stock ``JiraRenderer`` with:
+
+    - no backslash-escaping inside ``{{inline code}}``
+    - code-block language normalization to Jira's supported set
+    - image alt text (``!src|alt=text!``)
+    - newline-preserving soft line breaks
+    - inline HTML formatting tags translated to Jira text effects
+    """
+
+    def __init__(
+        self,
+        *extras: Any,
+        normalize_language: Callable[[str | None], str | None] | None = None,
+    ) -> None:
+        super().__init__(*extras)
+        self.normalize_language = normalize_language
+        self._span_color_stack: list[bool] = []
+
+    # Jira text effects (*bold*, _italic_, -strike-, +ins+, ^sup^, ~sub~)
+    # only trigger at word boundaries; macros and links ({...}, [...])
+    # trigger anywhere.
+    _EFFECT_CHARS = frozenset("*_+^~-")
+    _MACRO_CHARS = frozenset("{}[]")
+
+    def render_raw_text(self, token: Any, escape: bool = True) -> str:
+        """Escape Jira markup characters, but only where Jira would
+        actually interpret them.
+
+        The stock renderer escapes every special character adjacent to
+        non-whitespace, littering ordinary text like ``Sub-item`` or
+        ``2024-01-01`` with backslashes.  Effect characters between two
+        word characters can never open or close a Jira text effect, so
+        they are left alone.
+        """
+        if not escape:
+            return str(token.content)
+
+        text = token.content
+        length = len(text)
+        if length == 1 and (text in self._EFFECT_CHARS or text in self._MACRO_CHARS):
+            return "\\" + text
+
+        result: list[str] = []
+        for i, char in enumerate(text):
+            prev = text[i - 1] if i > 0 else ""
+            nxt = text[i + 1] if i < length - 1 else ""
+            if char in self._MACRO_CHARS:
+                if (prev and not prev.isspace()) or (nxt and not nxt.isspace()):
+                    result.append("\\" + char)
+                    continue
+            elif char in self._EFFECT_CHARS:
+                prev_word = bool(prev) and (prev.isalnum() or prev == "_")
+                next_word = bool(nxt) and (nxt.isalnum() or nxt == "_")
+                could_open = not prev_word and bool(nxt) and not nxt.isspace()
+                could_close = bool(prev) and not prev.isspace() and not next_word
+                if could_open or could_close:
+                    result.append("\\" + char)
+                    continue
+            result.append(char)
+        return "".join(result)
+
+    def render_inline_code(self, token: Any) -> str:
+        # Jira renders {{...}} content literally; backslash escapes
+        # inserted by render_raw_text would show up verbatim.
+        return "{{" + token.children[0].content + "}}"
+
+    def render_block_code(self, token: Any) -> str:
+        lang = token.language or ""
+        if self.normalize_language is not None:
+            lang = self.normalize_language(lang) or ""
+        attr = f":{lang}" if lang else ""
+        inner = token.children[0].content
+        return "{code" + attr + "}\n" + inner + "{code}" + self._block_eol(token)
+
+    def render_image(self, token: Any) -> str:
+        alt = "".join(
+            child.content for child in token.children if hasattr(child, "content")
+        )
+        if alt:
+            return f"!{token.src}|alt={alt}!"
+        return f"!{token.src}!"
+
+    def render_line_break(self, token: Any) -> str:
+        # Jira preserves single newlines, so keeping soft breaks as
+        # newlines matches the author's visual intent.
+        if token.soft:
+            return "\n"
+        return "\\\\\n"
+
+    def render_quote(self, token: Any) -> str:
+        # "bq. " only quotes a single line; any quote whose content
+        # spans multiple lines needs a {quote} block.
+        self.lastChildOfQuotes.append(token.children[-1])
+        inner = self.render_inner(token)
+        del self.lastChildOfQuotes[-1]
+        if len(token.children) == 1 and "\n" not in inner.rstrip("\n"):
+            return "bq. " + inner + self._block_eol(token)[0:-1]
+        return "{quote}\n" + inner + "{quote}" + self._block_eol(token)
+
+    def render_html_span(self, token: Any) -> str:
+        return self._convert_html_tag(token.content)
+
+    def render_html_block(self, token: Any) -> str:
+        content = _HTML_TAG_RE.sub(
+            lambda m: self._convert_html_tag(m.group(0)), token.content
+        )
+        return content + self._block_eol(token)
+
+    def _convert_html_tag(self, content: str) -> str:
+        """Translate a single inline HTML tag to Jira markup."""
+        match = _HTML_TAG_RE.fullmatch(content.strip())
+        if not match:
+            return content
+        closing, tag, attrs = match.group(1), match.group(2).lower(), match.group(3)
+        if tag == "br":
+            return "\n"
+        marker = _HTML_TAG_MARKERS.get(tag)
+        if marker is not None:
+            return marker
+        if tag in ("span", "font"):
+            if closing:
+                had_color = (
+                    self._span_color_stack.pop() if self._span_color_stack else False
+                )
+                return "{color}" if had_color else ""
+            color_match = _COLOR_ATTR_RE.search(attrs)
+            if color_match:
+                self._span_color_stack.append(True)
+                return "{color:" + color_match.group(1) + "}"
+            self._span_color_stack.append(False)
+            return ""
+        return content
 
 
 class JiraPreprocessor(BasePreprocessor):
@@ -140,11 +569,41 @@ class JiraPreprocessor(BasePreprocessor):
 
         # Convert markup only if translation is enabled
         if not self.disable_translation:
+            # Smart-link processing above already produced Markdown
+            # links; protect them from the wiki-markup parser.
+            md_links: list[str] = []
+            text = _extract_blocks(
+                text,
+                r"\[[^\]\n]*\]\([^)\n]*\)",
+                lambda m: m.group(0),
+                md_links,
+                "MDLINK",
+            )
+
             # First convert any Jira markup to Markdown
             text = self.jira_to_markdown(text)
 
+            # Protect Markdown autolinks (<https://...>) and the inline
+            # formatting tags this pipeline emits itself (<ins>, <cite>,
+            # <span style="color:...">, ...) from the HTML-to-Markdown
+            # pass: markdownify collapses newlines and escapes Markdown
+            # in every text node it touches, so it must only run when
+            # genuine HTML content remains.
+            autolinks: list[str] = []
+            text = _extract_blocks(
+                text,
+                r"<[a-zA-Z][a-zA-Z0-9+.-]*://[^>\s]+>"
+                r"|</?(?:span|ins|cite|sup|sub|del|u|q|font)\b[^<>]*>",
+                lambda m: m.group(0),
+                autolinks,
+                "AUTOLINK",
+            )
+
             # Then convert any remaining HTML to markdown
             text = self._convert_html_to_markdown(text)
+
+            text = _restore_blocks(text, autolinks, "AUTOLINK")
+            text = _restore_blocks(text, md_links, "MDLINK")
 
         return text.strip()
 
@@ -204,7 +663,12 @@ class JiraPreprocessor(BasePreprocessor):
 
     def jira_to_markdown(self, input_text: str) -> str:
         """
-        Convert Jira markup to Markdown format.
+        Convert Jira wiki markup to Markdown format.
+
+        Uses the ``jira2markdown`` parser, which handles the full wiki
+        syntax (headings, text effects, lists, tables, panels, code
+        blocks, links, mentions, colors) far more reliably than regex
+        chains.  Returns the input unchanged if parsing fails.
 
         Args:
             input_text: Text in Jira markup format
@@ -218,169 +682,54 @@ class JiraPreprocessor(BasePreprocessor):
         if self.disable_translation:
             return input_text
 
-        output = input_text
+        if len(input_text) > _WIKI_PARSER_MAX_CHARS:
+            logger.debug(
+                "Input exceeds %d chars; using regex wiki-markup fallback",
+                _WIKI_PARSER_MAX_CHARS,
+            )
+            return _regex_jira_to_markdown(input_text).rstrip("\n")
 
-        # Protect code/noformat/inline-code blocks from downstream
-        # transformations by replacing them with placeholders.
-        #
-        # Trade-off: when {quote} wraps a {code} block, the code
-        # content is extracted *before* the {quote} handler runs.
-        # The {quote} handler prefixes each remaining line with
-        # "> " but cannot reach inside the already-extracted block.
-        # After restoration the opening fence line may carry "> "
-        # while inner code lines do not, breaking blockquote
-        # continuity.  This is intentional: protecting code content
-        # from markup corruption is more important than preserving
-        # blockquote indentation around code fences.
+        try:
+            output = _convert_wiki_cached(input_text)
+        except Exception as e:
+            logger.warning(f"Error parsing Jira markup, using regex fallback: {e}")
+            try:
+                return _regex_jira_to_markdown(input_text).rstrip("\n")
+            except Exception:
+                return input_text
+
+        # Normalize HTML produced by jira2markdown to the tags this
+        # pipeline has historically used, protecting code content.
         code_blocks: list[str] = []
         inline_codes: list[str] = []
-
-        def _jira_code_to_md(match: re.Match[str]) -> str:
-            lang = match.group(1) or ""
-            content = match.group(2)
-            return f"```{lang}\n{content}\n```"
-
         output = _extract_blocks(
             output,
-            r"\{code(?::([a-z]+))?\}([\s\S]*?)\{code\}",
-            _jira_code_to_md,
+            r"```[^\n]*\n[\s\S]*?\n```",
+            lambda m: m.group(0),
             code_blocks,
-            "CODEBLOCK",
-            flags=re.MULTILINE,
+            "J2MCODE",
         )
         output = _extract_blocks(
             output,
-            r"\{noformat\}([\s\S]*?)\{noformat\}",
-            lambda m: f"```\n{m.group(1)}\n```",
-            code_blocks,
-            "CODEBLOCK",
-        )
-        output = _extract_blocks(
-            output,
-            r"\{\{([^}]+)\}\}",
-            lambda m: f"`{m.group(1)}`",
+            r"`[^`\n]+`",
+            lambda m: m.group(0),
             inline_codes,
-            "INLINECODE",
+            "J2MINLINE",
         )
 
-        # Block quotes
-        output = re.sub(r"^bq\.(.*?)$", r"> \1\n", output, flags=re.MULTILINE)
-
-        # Text formatting (bold, italic)
+        output = re.sub(r"<(/?)u>", r"<\1ins>", output)
+        output = re.sub(r"<(/?)q>", r"<\1cite>", output)
         output = re.sub(
-            r"([*_])(.*?)\1",
-            lambda match: ("**" if match.group(1) == "*" else "*")
-            + match.group(2)
-            + ("**" if match.group(1) == "*" else "*"),
+            r"<font color=[\"']?(#?\w+)[\"']?>",
+            r'<span style="color:\1">',
             output,
         )
+        output = output.replace("</font>", "</span>")
 
-        # Multi-level numbered list
-        output = re.sub(
-            r"^((?:#|-|\+|\*)+) (.*)$",
-            lambda match: self._convert_jira_list_to_markdown(match),
-            output,
-            flags=re.MULTILINE,
-        )
+        output = _restore_blocks(output, inline_codes, "J2MINLINE")
+        output = _restore_blocks(output, code_blocks, "J2MCODE")
 
-        # Headers
-        output = re.sub(
-            r"^h([0-6])\.(.*)$",
-            lambda match: "#" * int(match.group(1)) + match.group(2),
-            output,
-            flags=re.MULTILINE,
-        )
-
-        # Citation (non-overlapping alternation to avoid catastrophic backtracking)
-        output = re.sub(
-            r"\?\?([^?]+(?:\?[^?]+)*)\?\?",
-            r"<cite>\1</cite>",
-            output,
-        )
-
-        # Inserted text
-        output = re.sub(r"\+([^+]*)\+", r"<ins>\1</ins>", output)
-
-        # Superscript
-        output = re.sub(r"\^([^^]*)\^", r"<sup>\1</sup>", output)
-
-        # Subscript
-        output = re.sub(r"~([^~]*)~", r"<sub>\1</sub>", output)
-
-        # Strikethrough
-        output = re.sub(r"-([^-]*)-", r"-\1-", output)
-
-        # Quote blocks
-        output = re.sub(
-            r"\{quote\}([\s\S]*)\{quote\}",
-            lambda match: "\n".join(
-                [f"> {line}" for line in match.group(1).split("\n")]
-            ),
-            output,
-            flags=re.MULTILINE,
-        )
-
-        # Panel blocks - extract content, optionally show title as bold
-        output = re.sub(
-            r"\{panel(?::([^}]*))?\}([\s\S]*?)\{panel\}",
-            lambda match: _convert_panel(match.group(1), match.group(2)),
-            output,
-            flags=re.MULTILINE,
-        )
-
-        # Images with alt text
-        output = re.sub(
-            r"!([^|\n\s]+)\|([^\n!]*)alt=([^\n!\,]+?)"
-            r"(,([^\n!]*))?!",
-            r"![\3](\1)",
-            output,
-        )
-
-        # Images with other parameters (ignore them)
-        output = re.sub(r"!([^|\n\s]+)\|([^\n!]*)!", r"![](\1)", output)
-
-        # Images without parameters
-        output = re.sub(r"!([^\n\s!]+)!", r"![](\1)", output)
-
-        # Links
-        output = re.sub(r"\[([^|]+)\|(.+?)\]", r"[\1](\2)", output)
-        output = re.sub(r"\[(.+?)\]([^\(])", r"\1\2", output)
-
-        # Colored text
-        output = re.sub(
-            r"\{color:([^}]+)\}([\s\S]*?)\{color\}",
-            r"<span style=\"color:\1\">\2</span>",
-            output,
-            flags=re.MULTILINE,
-        )
-
-        # Convert Jira table headers (||) to markdown table format
-        lines = output.split("\n")
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-
-            if "||" in line:
-                # Replace Jira table headers
-                lines[i] = lines[i].replace("||", "|")
-
-                # Add a separator line for markdown tables
-                header_cells = lines[i].count("|") - 1
-                if header_cells > 0:
-                    separator_line = "|" + "---|" * header_cells
-                    lines.insert(i + 1, separator_line)
-                    i += 1
-
-            i += 1
-
-        # Rejoin the lines
-        output = "\n".join(lines)
-
-        # Restore code/noformat blocks and inline code
-        output = _restore_blocks(output, code_blocks, "CODEBLOCK")
-        output = _restore_blocks(output, inline_codes, "INLINECODE")
-
-        return output
+        return output.rstrip("\n")
 
     def _normalize_code_language(self, lang: str | None) -> str | None:
         """
@@ -412,7 +761,15 @@ class JiraPreprocessor(BasePreprocessor):
 
     def markdown_to_jira(self, input_text: str) -> str:
         """
-        Convert Markdown syntax to Jira markup syntax.
+        Convert Markdown syntax to Jira wiki markup syntax.
+
+        Parses the input as CommonMark (plus tables and strikethrough)
+        with ``mistletoe`` and renders Jira wiki markup, so nested
+        lists, tables with alignment rows, blockquotes, and code blocks
+        all survive the conversion.  Jira-specific syntax that agents
+        may emit directly — ``[~mentions]`` and nested-list lines like
+        ``** item`` — is preserved verbatim.  Returns the input
+        unchanged if parsing fails.
 
         Args:
             input_text: Text in Markdown format
@@ -426,183 +783,41 @@ class JiraPreprocessor(BasePreprocessor):
         if self.disable_translation:
             return input_text
 
-        code_blocks: list[str] = []
-        inline_codes: list[str] = []
+        try:
+            return self._markdown_to_jira(input_text)
+        except Exception as e:
+            logger.warning(f"Error converting Markdown to Jira markup: {e}")
+            return input_text
 
-        def _md_code_to_jira(match: re.Match[str]) -> str:
-            syntax = match.group(1) or ""
-            content = match.group(2)
-            jira_lang = self._normalize_code_language(syntax)
-            code = "{code"
-            if jira_lang:
-                code += ":" + jira_lang
-            code += "}" + content + "{code}"
-            return code
-
-        def _md_inline_to_jira(
-            match: re.Match[str],
-        ) -> str:
-            return "{{" + match.group(1) + "}}"
-
-        # Extract code blocks and inline code before
-        # any other transformations.
+    def _markdown_to_jira(self, input_text: str) -> str:
+        """Run the actual Markdown -> Jira wiki markup conversion."""
+        # Preserve Jira syntax the Markdown parser would mangle.
+        mentions: list[str] = []
         output = _extract_blocks(
             input_text,
-            r"```(\w*)\n([\s\S]+?)```",
-            _md_code_to_jira,
-            code_blocks,
-            "CODEBLOCK",
+            _JIRA_MENTION_RE,
+            lambda m: m.group(0),
+            mentions,
+            "JIRAMENTION",
         )
+        jira_lists: list[str] = []
         output = _extract_blocks(
             output,
-            r"`([^`]+)`",
-            _md_inline_to_jira,
-            inline_codes,
-            "INLINECODE",
-        )
-
-        # Headers with = or - underlines
-        output = re.sub(
-            r"^(.*?)\n([=-])+$",
-            lambda match: (
-                f"h{1 if match.group(2)[0] == '=' else 2}. {match.group(1)}"
-            ),
-            output,
+            _JIRA_NESTED_LIST_RE,
+            lambda m: m.group(0),
+            jira_lists,
+            "JIRALIST",
             flags=re.MULTILINE,
         )
 
-        # Headers with # prefix - require space after #
-        # to distinguish from Jira lists (issue #786)
-        output = re.sub(
-            r"^([#]+) (.*)$",
-            lambda match: f"h{len(match.group(1))}. " + match.group(2),
-            output,
-            flags=re.MULTILINE,
-        )
+        output = _normalize_list_indentation(output)
 
-        # Bold and italic - skip lines starting with
-        # asterisks+space (Jira list syntax, issue #786)
-        def convert_bold_italic_line(line: str) -> str:
-            if re.match(r"^[*_]+\s", line):
-                return line
-            return re.sub(
-                r"([*_]+)(.*?)\1",
-                lambda m: ("_" if len(m.group(1)) == 1 else "*")
-                + m.group(2)
-                + ("_" if len(m.group(1)) == 1 else "*"),
-                line,
-            )
+        with JiraMarkupRenderer(
+            normalize_language=self._normalize_code_language
+        ) as renderer:
+            output = renderer.render(Document(output))
 
-        lines = output.split("\n")
-        output = "\n".join(convert_bold_italic_line(line) for line in lines)
-
-        # Multi-level bulleted list
-        def bulleted_list_fn(match: re.Match[str]) -> str:
-            ident = len(match.group(1)) if match.group(1) else 0
-            level = ident // 2 + 1
-            return str("*" * level + " " + match.group(2))
-
-        output = re.sub(
-            r"^(\s+)?[-+*] (.*)$",
-            bulleted_list_fn,
-            output,
-            flags=re.MULTILINE,
-        )
-
-        # Multi-level numbered list
-        def numbered_list_fn(
-            match: re.Match[str],
-        ) -> str:
-            ident = len(match.group(1)) if match.group(1) else 0
-            level = ident // 2 + 1
-            return str("#" * level + " " + match.group(2))
-
-        output = re.sub(
-            r"^(\s+)?\d+\. (.*)$",
-            numbered_list_fn,
-            output,
-            flags=re.MULTILINE,
-        )
-
-        # HTML formatting tags to Jira markup
-        tag_map = {
-            "cite": "??",
-            "del": "-",
-            "ins": "+",
-            "sup": "^",
-            "sub": "~",
-        }
-
-        for tag, replacement in tag_map.items():
-            output = re.sub(
-                rf"<{tag}>(.*?)<\/{tag}>",
-                rf"{replacement}\1{replacement}",
-                output,
-            )
-
-        # Colored text
-        output = re.sub(
-            r"<span style=\"color:(#[^\"]+)\">"
-            r"([\s\S]*?)</span>",
-            r"{color:\1}\2{color}",
-            output,
-            flags=re.MULTILINE,
-        )
-
-        # Strikethrough
-        output = re.sub(r"~~(.*?)~~", r"-\1-", output)
-
-        # Images without alt text
-        output = re.sub(r"!\[\]\(([^)\n\s]+)\)", r"!\1!", output)
-
-        # Images with alt text
-        output = re.sub(
-            r"!\[([^\]\n]+)\]\(([^)\n\s]+)\)",
-            r"!\2|alt=\1!",
-            output,
-        )
-
-        # Links
-        output = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"[\1|\2]", output)
-        output = re.sub(r"<([^>]+)>", r"[\1]", output)
-
-        # Convert markdown tables to Jira table format
-        lines = output.split("\n")
-        i = 0
-        while i < len(lines):
-            if i < len(lines) - 1 and re.match(r"\|[-\s|]+\|", lines[i + 1]):
-                lines[i] = lines[i].replace("|", "||")
-                lines.pop(i + 1)
-            i += 1
-
-        # Rejoin the lines
-        output = "\n".join(lines)
-
-        # Restore code blocks and inline code
-        output = _restore_blocks(output, code_blocks, "CODEBLOCK")
-        output = _restore_blocks(output, inline_codes, "INLINECODE")
-
+        output = output.rstrip("\n")
+        output = _restore_blocks(output, jira_lists, "JIRALIST")
+        output = _restore_blocks(output, mentions, "JIRAMENTION")
         return output
-
-    def _convert_jira_list_to_markdown(self, match: re.Match) -> str:
-        """
-        Helper method to convert Jira lists to Markdown format.
-
-        Args:
-            match: Regex match object containing the Jira list markup
-
-        Returns:
-            Markdown-formatted list item
-        """
-        jira_bullets = match.group(1)
-        content = match.group(2)
-
-        # Calculate indentation level based on number of symbols
-        indent_level = len(jira_bullets) - 1
-        indent = " " * (indent_level * 2)
-
-        # Determine the marker based on the last character
-        last_char = jira_bullets[-1]
-        prefix = "1." if last_char == "#" else "-"
-
-        return f"{indent}{prefix} {content}"

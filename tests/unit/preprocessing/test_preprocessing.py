@@ -129,14 +129,14 @@ def test_clean_jira_text_smart_links(preprocessor_with_jira):
     cleaned = preprocessor_with_jira.clean_jira_text(text)
     assert cleaned == f"[PROJ-123]({base_url}/browse/PROJ-123)"
 
-    # Test Confluence page link from mock data
+    # Test Confluence page link from mock data; the URL must survive
+    # unchanged (the old regex pipeline corrupted the "+" characters)
     confluence_url = (
         f"{base_url}/wiki/spaces/PROJ/pages/987654321/Example+Meeting+Notes"
     )
-    processed_url = f"{base_url}/wiki/spaces/PROJ/pages/987654321/ExampleMeetingNotes"
     text = f"[Meeting Notes|{confluence_url}|smart-link]"
     cleaned = preprocessor_with_jira.clean_jira_text(text)
-    assert cleaned == f"[Example Meeting Notes]({processed_url})"
+    assert cleaned == f"[Example Meeting Notes]({confluence_url})"
 
 
 def test_clean_jira_text_html_content(preprocessor_with_jira):
@@ -188,7 +188,7 @@ def test_jira_to_markdown(preprocessor_with_jira):
 
     # Test text formatting
     assert preprocessor_with_jira.jira_to_markdown("*bold text*") == "**bold text**"
-    assert preprocessor_with_jira.jira_to_markdown("_italic text_") == "*italic text*"
+    assert preprocessor_with_jira.jira_to_markdown("_italic text_") == "_italic text_"
 
     # Test code blocks
     assert preprocessor_with_jira.jira_to_markdown("{{code}}") == "`code`"
@@ -1247,33 +1247,24 @@ class TestCodeBlockProtection:
         assert "# comment" in jira_output
         assert "print('hi')" in jira_output
 
-    def test_quote_wrapping_code_loses_blockquote_on_inner_lines(
+    def test_quote_wrapping_code_keeps_blockquote_on_inner_lines(
         self,
         preprocessor,
     ):
-        """Document trade-off: {quote} around {code} loses blockquote context.
+        """{quote} around {code} keeps blockquote context on every line.
 
-        Placeholder extraction protects code content from markup
-        corruption, but the {quote} handler cannot reach inside the
-        already-extracted block.  The opening fence line may carry
-        "> " while inner code lines do not.  This is the expected
-        (intentional) behavior.
+        The old regex pipeline could not reach inside extracted code
+        blocks, so inner code lines lost their "> " prefix.  The
+        parser-based conversion blockquotes the whole fenced block.
         """
         result = preprocessor.jira_to_markdown("{quote}{code}x = 1{code}{quote}")
         # Code content is preserved literally
         assert "x = 1" in result
-        # Code fence is present
-        assert "```" in result
-        # The opening fence gets blockquote prefix from {quote}
+        # Code fence is present and carries the blockquote prefix
         assert "> ```" in result
-        # Inner code line does NOT get blockquote prefix -- this
-        # is the known trade-off of placeholder-based protection.
-        lines = result.strip().splitlines()
-        code_lines = [ln for ln in lines if ln.strip() and "```" not in ln]
-        for ln in code_lines:
-            assert not ln.startswith("> "), (
-                f"Inner code line unexpectedly blockquoted: {ln!r}"
-            )
+        # Every line of the quoted code block stays blockquoted
+        for line in result.strip().splitlines():
+            assert line.startswith(">"), f"Line lost blockquote prefix: {line!r}"
 
 
 class TestHtmlConversionCodeProtection:
@@ -1382,3 +1373,220 @@ class TestHtmlConversionCodeProtection:
         """Direct test of _convert_html_to_markdown with markdown code spans."""
         result = preprocessor._convert_html_to_markdown(md_input)
         assert expected_substr in result, f"Expected '{expected_substr}' in: {result!r}"
+
+
+# Parser-based conversion regression tests
+#
+# These cover cases the old regex pipeline got wrong: tables with
+# alignment rows, blockquotes on the write path, 4-space nested lists,
+# mid-word markup characters, mixed nested lists, and Markdown
+# structure surviving the HTML cleanup pass.
+
+
+class TestMarkdownToJiraParser:
+    """Markdown -> Jira wiki markup via the mistletoe-based renderer."""
+
+    @pytest.fixture
+    def preprocessor(self):
+        return JiraPreprocessor(base_url="https://example.atlassian.net")
+
+    def test_table_with_alignment_row(self, preprocessor):
+        markdown = (
+            "| Name | Count |\n"
+            "|:-----|------:|\n"
+            "| foo  | 1     |\n"
+            "| bar  | 2     |"
+        )
+        result = preprocessor.markdown_to_jira(markdown)
+        assert "||Name||Count||" in result
+        assert "|foo|1|" in result
+        assert "|bar|2|" in result
+        # The alignment row must not leak into the output
+        assert ":---" not in result
+        assert "---:" not in result
+
+    def test_single_line_blockquote(self, preprocessor):
+        result = preprocessor.markdown_to_jira("> quoted text")
+        assert result == "bq. quoted text"
+
+    def test_multi_line_blockquote_uses_quote_block(self, preprocessor):
+        result = preprocessor.markdown_to_jira("> first line\n> second line")
+        assert result.startswith("{quote}")
+        assert result.rstrip().endswith("{quote}")
+        assert "first line" in result
+        assert "second line" in result
+
+    def test_nested_bullet_list_4space(self, preprocessor):
+        markdown = "- Item A\n    - Sub A.1\n        - Sub A.1.1\n- Item B"
+        result = preprocessor.markdown_to_jira(markdown)
+        assert "* Item A" in result
+        assert "** Sub A.1" in result
+        assert "*** Sub A.1.1" in result
+        assert "* Item B" in result
+
+    def test_ordered_list_inside_bullet_list(self, preprocessor):
+        markdown = "- outer\n  1. inner one\n  2. inner two"
+        result = preprocessor.markdown_to_jira(markdown)
+        assert "* outer" in result
+        assert "*# inner one" in result
+        assert "*# inner two" in result
+
+    def test_mid_word_characters_not_escaped(self, preprocessor):
+        markdown = "Use snake_case_name and well-known 2024-01-15 values."
+        result = preprocessor.markdown_to_jira(markdown)
+        assert "snake_case_name" in result
+        assert "well-known" in result
+        assert "2024-01-15" in result
+        assert "\\" not in result
+
+    def test_inline_code_content_not_escaped(self, preprocessor):
+        result = preprocessor.markdown_to_jira("run `my_var --dry-run` now")
+        assert "{{my_var --dry-run}}" in result
+
+    def test_jira_mentions_preserved(self, preprocessor):
+        markdown = "Ping [~jsmith] and [~accountid:abc-123] about this."
+        result = preprocessor.markdown_to_jira(markdown)
+        assert "[~jsmith]" in result
+        assert "[~accountid:abc-123]" in result
+
+    def test_horizontal_rule(self, preprocessor):
+        result = preprocessor.markdown_to_jira("before\n\n---\n\nafter")
+        assert "----" in result
+
+    def test_strikethrough(self, preprocessor):
+        result = preprocessor.markdown_to_jira("this is ~~removed~~ text")
+        assert "-removed-" in result
+
+    def test_image_with_alt_text(self, preprocessor):
+        result = preprocessor.markdown_to_jira("![diagram](https://x.test/d.png)")
+        assert "!https://x.test/d.png|alt=diagram!" in result
+
+    def test_image_without_alt_text(self, preprocessor):
+        result = preprocessor.markdown_to_jira("![](https://x.test/d.png)")
+        assert "!https://x.test/d.png!" in result
+
+    def test_inline_html_formatting_tags(self, preprocessor):
+        result = preprocessor.markdown_to_jira("E = mc<sup>2</sup> and H<sub>2</sub>O")
+        assert "mc^2^" in result
+        assert "H~2~O" in result
+
+    def test_html_color_span_round_trip(self, preprocessor):
+        result = preprocessor.markdown_to_jira(
+            'a <span style="color:red">warning</span> here'
+        )
+        assert "{color:red}warning{color}" in result
+
+    def test_parse_failure_returns_input(self, preprocessor, monkeypatch):
+        import mcp_atlassian.preprocessing.jira as jira_mod
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("parser exploded")
+
+        monkeypatch.setattr(jira_mod, "Document", boom)
+        assert preprocessor.markdown_to_jira("# heading") == "# heading"
+
+
+class TestJiraToMarkdownParser:
+    """Jira wiki markup -> Markdown via jira2markdown."""
+
+    @pytest.fixture
+    def preprocessor(self):
+        return JiraPreprocessor(base_url="https://example.atlassian.net")
+
+    def test_code_block_without_language_has_no_default(self, preprocessor):
+        result = preprocessor.jira_to_markdown("{code}plain text{code}")
+        assert "```\nplain text\n```" in result
+        assert "Java" not in result
+
+    def test_code_block_language_lowercased(self, preprocessor):
+        result = preprocessor.jira_to_markdown("{code:Python}x = 1{code}")
+        assert "```python" in result
+
+    def test_mixed_nested_list(self, preprocessor):
+        result = preprocessor.jira_to_markdown(
+            "* bullet\n*# nested ordered\n* second bullet"
+        )
+        assert "- bullet" in result
+        assert "1. nested ordered" in result
+        assert "- second bullet" in result
+
+    def test_strikethrough_converted(self, preprocessor):
+        result = preprocessor.jira_to_markdown("this is -removed- text")
+        assert "~~removed~~" in result
+
+    def test_mention_converted(self, preprocessor):
+        result = preprocessor.jira_to_markdown("[~jdoe] please review")
+        assert "@jdoe" in result
+
+    def test_oversized_input_uses_regex_fallback(self, preprocessor):
+        import time
+
+        big = "h2. Section\n\nSome *bold* text.\n\n" * 2000
+        start = time.time()
+        result = preprocessor.jira_to_markdown(big)
+        assert time.time() - start < 5.0
+        assert "## Section" in result
+        assert "**bold**" in result
+
+    def test_parse_failure_falls_back_to_regex(self, preprocessor, monkeypatch):
+        import mcp_atlassian.preprocessing.jira as jira_mod
+
+        def boom(text):
+            raise RuntimeError("parser exploded")
+
+        monkeypatch.setattr(jira_mod, "_convert_wiki_cached", boom)
+        result = preprocessor.jira_to_markdown("h1. Title")
+        assert result == "# Title"
+
+
+class TestCleanJiraTextStructure:
+    """clean_jira_text must not corrupt Markdown structure."""
+
+    @pytest.fixture
+    def preprocessor(self):
+        return JiraPreprocessor(base_url="https://example.atlassian.net")
+
+    def test_blank_lines_survive_color_markup(self, preprocessor):
+        text = (
+            "h1. Title\n\nParagraph with *bold* text.\n\n"
+            "{color:red}alert{color}\n\nLast paragraph."
+        )
+        result = preprocessor.clean_jira_text(text)
+        # Block separation must survive even though {color} produces
+        # an inline HTML span in the output
+        assert "# Title\n\n" in result
+        assert "**bold**" in result
+        assert "\\*" not in result
+        assert "Last paragraph." in result
+
+    def test_bare_comparison_operators_do_not_trigger_html_pass(self, preprocessor):
+        text = "h2. Check\n\nif x < 10 and y > 2 then *stop*."
+        result = preprocessor.clean_jira_text(text)
+        assert "## Check\n\n" in result
+        assert "x < 10" in result
+        assert "**stop**" in result
+
+    def test_quoted_code_block_fully_blockquoted(self, preprocessor):
+        text = "{quote}\nnote:\n{code:python}\nraise Error()\n{code}\n{quote}"
+        result = preprocessor.clean_jira_text(text)
+        for line in result.splitlines():
+            if line.strip():
+                assert line.startswith(">"), f"Line lost quote prefix: {line!r}"
+
+    def test_round_trip_structure(self, preprocessor):
+        jira = (
+            "h2. Steps\n\n"
+            "# First step\n"
+            "#* nested bullet\n"
+            "# Second step\n\n"
+            "{code:python}\nprint('hi')\n{code}\n\n"
+            "|| Col A || Col B ||\n| 1 | 2 |"
+        )
+        markdown = preprocessor.jira_to_markdown(jira)
+        back = preprocessor.markdown_to_jira(markdown)
+        assert "h2. Steps" in back
+        assert "# First step" in back
+        assert "#* nested bullet" in back
+        assert "# Second step" in back
+        assert "{code:python}" in back
+        assert "||Col A||Col B||" in back

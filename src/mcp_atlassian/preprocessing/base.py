@@ -401,7 +401,10 @@ class BasePreprocessor:
             "HTMLCVTINLINE",
         )
 
-        if re.search(r"<[^>]+>", text):
+        # Only trigger on real-looking HTML tags; bare comparisons like
+        # "a < b and c > d" must not send the text through markdownify,
+        # which collapses newlines in surrounding (non-HTML) content.
+        if re.search(r"</?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^<>]*)?/?>", text):
             try:
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=UserWarning)

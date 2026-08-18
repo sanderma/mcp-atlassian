@@ -66,6 +66,10 @@ _JIRA_NESTED_LIST_RE = r"^(?!#+ )[*#]{2,} .*$"
 # Markdown parsing untouched.
 _JIRA_MENTION_RE = r"\[~[^\]\n]+\]"
 
+# Issue keys may carry numeric segments (e.g. PROJ-123-45) on some
+# Server/DC setups (issue #1476).
+_ISSUE_KEY_PATTERN = r"[A-Z][A-Z0-9_]+-\d+(?:-\d+)*"
+
 _LIST_ITEM_RE = re.compile(r"^(\s*)((?:[-+*]|\d{1,9}[.)])\s+)(\S.*)$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
@@ -335,43 +339,49 @@ class JiraMarkupRenderer(JiraRenderer):
         self.normalize_language = normalize_language
         self._span_color_stack: list[bool] = []
 
-    # Jira text effects (*bold*, _italic_, -strike-, +ins+, ^sup^, ~sub~)
-    # only trigger at word boundaries; macros and links ({...}, [...])
-    # trigger anywhere.
-    _EFFECT_CHARS = frozenset("*_+^~-")
+    # Jira's emphasis engine triggers *bold* and _italic_ even inside
+    # words (the classic "snake_case turns italic" problem), so those
+    # two are escaped whenever they touch non-whitespace.  The other
+    # text effects (-strike-, +ins+, ^sup^, ~sub~) only matter at word
+    # boundaries, and macros/links ({...}, [...]) trigger anywhere.
+    _EMPHASIS_CHARS = frozenset("*_")
+    _BOUNDARY_EFFECT_CHARS = frozenset("+^~-")
     _MACRO_CHARS = frozenset("{}[]")
 
     def render_raw_text(self, token: Any, escape: bool = True) -> str:
-        """Escape Jira markup characters, but only where Jira would
-        actually interpret them.
+        """Escape Jira markup characters where Jira would interpret them.
 
-        The stock renderer escapes every special character adjacent to
-        non-whitespace, littering ordinary text like ``Sub-item`` or
-        ``2024-01-01`` with backslashes.  Effect characters between two
-        word characters can never open or close a Jira text effect, so
-        they are left alone.
+        ``*`` and ``_`` are escaped aggressively because Jira applies
+        emphasis intraword (``foo_bar_baz`` renders with italic "bar"
+        otherwise; ``\\_`` renders as a plain underscore).  The
+        boundary-only effect characters are left alone between word
+        characters, so ``Sub-item`` and ``2024-01-01`` stay readable.
         """
         if not escape:
             return str(token.content)
 
         text = token.content
         length = len(text)
-        if length == 1 and (text in self._EFFECT_CHARS or text in self._MACRO_CHARS):
+        if length == 1 and text in (
+            self._EMPHASIS_CHARS | self._BOUNDARY_EFFECT_CHARS | self._MACRO_CHARS
+        ):
             return "\\" + text
 
         result: list[str] = []
         for i, char in enumerate(text):
             prev = text[i - 1] if i > 0 else ""
             nxt = text[i + 1] if i < length - 1 else ""
-            if char in self._MACRO_CHARS:
-                if (prev and not prev.isspace()) or (nxt and not nxt.isspace()):
+            prev_solid = bool(prev) and not prev.isspace()
+            next_solid = bool(nxt) and not nxt.isspace()
+            if char in self._MACRO_CHARS or char in self._EMPHASIS_CHARS:
+                if prev_solid or next_solid:
                     result.append("\\" + char)
                     continue
-            elif char in self._EFFECT_CHARS:
+            elif char in self._BOUNDARY_EFFECT_CHARS:
                 prev_word = bool(prev) and (prev.isalnum() or prev == "_")
                 next_word = bool(nxt) and (nxt.isalnum() or nxt == "_")
-                could_open = not prev_word and bool(nxt) and not nxt.isspace()
-                could_close = bool(prev) and not prev.isspace() and not next_word
+                could_open = not prev_word and next_solid
+                could_close = prev_solid and not next_word
                 if could_open or could_close:
                     result.append("\\" + char)
                     continue
@@ -405,6 +415,11 @@ class JiraMarkupRenderer(JiraRenderer):
         if token.soft:
             return "\n"
         return "\\\\\n"
+
+    def render_thematic_break(self, token: Any) -> str:
+        # Keep a blank line after the rule so following text starts a
+        # fresh paragraph instead of hugging the ruler line.
+        return "----" + self._block_eol(token)
 
     def render_quote(self, token: Any) -> str:
         # "bq. " only quotes a single line; any quote whose content
@@ -640,7 +655,9 @@ class JiraPreprocessor(BasePreprocessor):
             link_url = match.group(2)
 
             # Extract issue key if it's a Jira issue link
-            issue_key_match = re.search(r"browse/([A-Z][A-Z0-9_]+-\d+)", link_url)
+            issue_key_match = re.search(
+                rf"browse/({_ISSUE_KEY_PATTERN})(?=$|[/?#])", link_url
+            )
             # Check if it's a Confluence wiki link
             confluence_match = re.search(
                 r"wiki/spaces/.+?/pages/\d+/(.+?)(?:\?|$)", link_url
@@ -653,7 +670,9 @@ class JiraPreprocessor(BasePreprocessor):
             elif confluence_match:
                 url_title = confluence_match.group(1)
                 readable_title = url_title.replace("+", " ")
-                readable_title = re.sub(r"^[A-Z][A-Z0-9_]+-\d+\s+", "", readable_title)
+                readable_title = re.sub(
+                    rf"^{_ISSUE_KEY_PATTERN}\s+", "", readable_title
+                )
                 text = text.replace(full_match, f"[{readable_title}]({link_url})")
             else:
                 clean_url = link_url.split("?")[0]

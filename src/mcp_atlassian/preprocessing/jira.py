@@ -21,6 +21,7 @@ from jira2markdown import convert as _jira2markdown_convert
 from jira2markdown.elements import MarkupElements
 from jira2markdown.markup.advanced import Code
 from mistletoe.block_token import Document
+from mistletoe.contrib import jira_renderer as jira_renderer_module
 from mistletoe.contrib.jira_renderer import JiraRenderer
 from pyparsing import ParseResults
 
@@ -401,20 +402,50 @@ class JiraMarkupRenderer(JiraRenderer):
         return "{{" + content + "}}"
 
     def render_block_code(self, token: Any) -> str:
+        inner = token.children[0].content
+        # Jira terminates a {code} block at the first inner {code...}
+        # token and offers no escaping, so content that mentions {code}
+        # (e.g. docs about Jira markup) must use {noformat} instead.
+        # Content containing both delimiters is not representable;
+        # {code} is kept as the least-bad option.
+        if "{code" in inner and "{noformat" not in inner:
+            return "{noformat}\n" + inner + "{noformat}" + self._block_eol(token)
         lang = token.language or ""
         if self.normalize_language is not None:
             lang = self.normalize_language(lang) or ""
         attr = f":{lang}" if lang else ""
-        inner = token.children[0].content
         return "{code" + attr + "}\n" + inner + "{code}" + self._block_eol(token)
 
     def render_image(self, token: Any) -> str:
         alt = "".join(
             child.content for child in token.children if hasattr(child, "content")
         )
+        # "!" ends the image markup, "|" and "," separate its
+        # parameters; none of them are escapable inside it.
+        alt = " ".join(alt.replace("!", "").replace("|", " ").replace(",", " ").split())
         if alt:
             return f"!{token.src}|alt={alt}!"
         return f"!{token.src}!"
+
+    def render_link(self, token: Any) -> str:
+        # "|" separates alias from URL in [text|url] and cannot be
+        # escaped, so pipes in the visible text become HTML entities.
+        inner = self.render_inner(token).replace("|", "&#124;")
+        target = jira_renderer_module.escape_url(token.target)
+        title = (
+            "|" + jira_renderer_module.escape_link_chars(token.title)
+            if token.title
+            else ""
+        )
+        return f"[{inner}|{target}{title}]"
+
+    def render_table_cell(self, token: Any, in_header: bool = False) -> str:
+        template = "||{inner}" if in_header else "|{inner}"
+        inner = self.render_inner(token).replace("|", "\\|")
+        # A raw newline (from a hard break or <br>) ends the table row;
+        # Jira's in-cell line break is "\\" without a newline.
+        inner = re.sub(r"(?:\\\\)?\n", r" \\\\ ", inner).strip()
+        return template.format(inner=inner or " ")
 
     def render_line_break(self, token: Any) -> str:
         # Jira preserves single newlines, so keeping soft breaks as

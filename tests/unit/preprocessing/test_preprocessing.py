@@ -1812,6 +1812,39 @@ class TestMarkdownToJiraParser:
         result = preprocessor.markdown_to_jira("![diagram](https://x.test/d.png)")
         assert "!https://x.test/d.png|alt=diagram!" in result
 
+    def test_code_block_containing_code_macro_uses_noformat(self, preprocessor):
+        """{code} inside a fence would terminate Jira's block early."""
+        markdown = "```\nuse {code:java} blocks {code}\n```"
+        result = preprocessor.markdown_to_jira(markdown)
+        assert result.startswith("{noformat}")
+        assert "use {code:java} blocks {code}" in result
+        assert result.rstrip().endswith("{noformat}")
+
+    def test_code_block_containing_both_macros_keeps_code(self, preprocessor):
+        """Content with {code} and {noformat} is unrepresentable; keep {code}."""
+        markdown = "```\n{code} and {noformat}\n```"
+        result = preprocessor.markdown_to_jira(markdown)
+        assert result.startswith("{code}")
+        assert "{code} and {noformat}" in result
+
+    def test_table_cell_line_break_does_not_split_row(self, preprocessor):
+        """A <br> in a cell must become Jira's in-cell \\\\ break."""
+        markdown = "| a | b |\n|---|---|\n| line1<br>line2 | x |"
+        result = preprocessor.markdown_to_jira(markdown)
+        assert "|line1 \\\\ line2|x|" in result
+
+    def test_image_alt_with_delimiter_characters_sanitized(self, preprocessor):
+        """!, | and , in alt text would corrupt the image markup."""
+        result = preprocessor.markdown_to_jira(
+            "![see this! now, ok](https://x.test/i.png)"
+        )
+        assert "!https://x.test/i.png|alt=see this now ok!" in result
+
+    def test_link_text_with_pipe_uses_entity(self, preprocessor):
+        """A pipe in link text would be parsed as the alias separator."""
+        result = preprocessor.markdown_to_jira("[a|b](https://x.test)")
+        assert "[a&#124;b|https://x.test]" in result
+
     def test_image_without_alt_text(self, preprocessor):
         result = preprocessor.markdown_to_jira("![](https://x.test/d.png)")
         assert "!https://x.test/d.png!" in result

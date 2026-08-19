@@ -98,7 +98,8 @@
               "docs/http-transport",
               "docs/compatibility",
               "docs/advanced/sla-metrics",
-              "docs/advanced/docker-production"
+              "docs/advanced/docker-production",
+              "docs/advanced/markdown-to-jira"
             ]
           },
           {

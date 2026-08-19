@@ -29,6 +29,32 @@ bash setup-test-data.sh
 bash create-pat.sh
 ```
 
+## Jira-only quick start (automated, no browser)
+
+The Markdown-to-wiki-markup rendering tests
+(`tests/e2e/test_markup_rendering_dc.py`) need only Jira. The setup
+wizard can be completed entirely over HTTP, including fetching the free
+timebomb license:
+
+```bash
+cp .env.example .env
+docker compose up -d jira-db jira
+bash setup-jira-wizard.sh     # fetches license + completes the wizard
+bash setup-test-data.sh       # creates the E2E project
+
+cd ../../..
+uv run pytest tests/e2e/test_markup_rendering_dc.py --dc-e2e -v
+```
+
+`setup-jira-wizard.sh` calls `get-jira-license.sh`, which downloads the
+public **Jira Software Data Center timebomb license** (10 users, valid
+3 hours from application, free, no Atlassian account) from
+[Atlassian's testing-licenses page](https://developer.atlassian.com/platform/marketplace/timebomb-licenses-for-testing-server-apps/)
+and prints it to stdout — run it on its own if you just need a key
+(`bash get-jira-license.sh "Confluence Data Center"` works too). If the
+page layout changes and extraction fails, copy the key manually from
+that page and pass it as the first argument to `setup-jira-wizard.sh`.
+
 ## Setup wizard (manual, one-time)
 
 Both Jira and Confluence require completing a setup wizard on first launch.

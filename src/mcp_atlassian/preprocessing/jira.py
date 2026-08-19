@@ -9,6 +9,11 @@ Markdown using real parsers instead of regex chains:
 
 Both directions fall back to returning the input text unchanged if the
 underlying parser raises, so a conversion bug never destroys content.
+
+The translation and escaping rules are documented in
+``docs/advanced/markdown-to-jira.mdx`` and validated against a real
+Jira DC renderer by ``tests/e2e/test_markup_rendering_dc.py`` — keep
+all three in sync when changing behavior here (AGENTS.md rule 9).
 """
 
 import html

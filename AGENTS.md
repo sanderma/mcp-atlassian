@@ -57,6 +57,7 @@ uv run pytest --cov=src/mcp_atlassian --cov-report=term-missing  # coverage
 6. **Commit types**: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`, `ci` — scopes: `jira`, `confluence`, `server`, `auth`, `docker`, `docs`
 7. **File hygiene**: Prefer editing existing files over creating new ones
 8. **Tool docs**: After changing tool signatures or registrations, run `uv run python scripts/generate_tool_docs.py` and commit the diff; CI (`Docs / check`) enforces this
+9. **Markup conversion**: Any change to `src/mcp_atlassian/preprocessing/jira.py` must update `docs/advanced/markdown-to-jira.mdx` (the translation/escaping tables), the exact-output unit tests, AND the rendering corpus in `tests/e2e/test_markup_rendering_dc.py`. Escaping behavior is validated against a real Jira DC renderer, never assumed — see the doc's Validation section for the one-command setup (`tests/e2e/docker/setup-jira-wizard.sh`)
 
 ---
 

@@ -1,0 +1,161 @@
+---
+title: "Markdown ↔ Jira Wiki Markup"
+description: "How the server translates Markdown to Jira wiki markup on Server/Data Center — the pipeline, the escaping rules, and how they are validated against a real Jira renderer"
+---
+
+Agents talk to this MCP server in **standard Markdown (GFM)**. On Jira
+Server/Data Center, every rich-text write (descriptions, comments,
+worklog and transition comments) is translated to Jira wiki markup, and
+every read is translated back to Markdown. On Jira Cloud the write path
+produces ADF instead and is not covered here.
+
+All conversion logic lives in `src/mcp_atlassian/preprocessing/jira.py`.
+
+> **Maintenance contract:** any change to the conversion behavior must
+> update this page, the exact-output unit tests, and the rendering
+> corpus in `tests/e2e/test_markup_rendering_dc.py` (see
+> [Validation](#validation)). AGENTS.md enforces this for agent-driven
+> changes.
+
+## Why this is hard
+
+Jira wiki markup has **no formal specification**. The only reference is
+the "Text Formatting Notation Help" page each instance serves; the real
+authority is the renderer implementation, whose behavior is quirky and
+version-dependent. Three properties make naive conversion corrupt text:
+
+1. **Effects fire inside monospace.** `{{...}}` is a text effect, not a
+   literal span: macros (`{panel}`), emphasis, strikethrough, links,
+   images, and citations all still execute inside it.
+2. **Backslash escaping is unreliable.** `\{` works for a single brace,
+   but `\{\{x\}\}` still becomes monospace, and escapes inside
+   `{{...}}` render as literal backslashes.
+3. **HTML entities always work in text.** `&#123;` renders as `{` in
+   prose, headings, table cells, and inside `{{...}}` — but **not**
+   inside `{code}`/`{noformat}` blocks (literal there) or bare URLs.
+
+The escaping strategy below was **derived empirically** against a live
+Jira DC 10.3 renderer, not from documentation.
+
+## Write path: Markdown → wiki markup
+
+Pipeline (`markdown_to_jira`):
+
+1. **Protect Jira passthrough syntax** — `[~mentions]` and Jira-style
+   nested list lines (`** item`, `*# item`) are placeholder-extracted
+   and restored verbatim at the end.
+2. **Protect pipes in code spans on table rows** — GFM splits cells on
+   `|` before inline parsing; pipes inside backtick spans are
+   pre-escaped as `\|` so the span stays in one cell.
+3. **Normalize list indentation** — agents commonly nest with 2 spaces;
+   CommonMark requires the parent's content column, so indentation is
+   re-mapped before parsing.
+4. **Parse as CommonMark** with [mistletoe](https://github.com/miyuchina/mistletoe)
+   and render with a customized `JiraRenderer` (all rules below).
+5. **Repair intraword emphasis** — CommonMark parses `2*3*4` as
+   emphasis, which Jira cannot render intraword; the author's literal
+   characters are restored (as entities). Code blocks, monospace,
+   links, images, and URLs are shielded from this repair.
+
+On any parser error the original Markdown is returned unchanged —
+conversion never destroys content.
+
+### Construct translation
+
+| Markdown | Jira wiki markup |
+|---|---|
+| `# H1` … `###### H6`, setext | `h1.` … `h6.` |
+| `**bold**` / `*italic*` / `~~strike~~` | `*bold*` / `_italic_` / `-strike-` |
+| `` `inline code` `` | `{{...}}` with full entity encoding (see below) |
+| ` ```lang ` fenced / indented code | `{code:lang}` — language normalized to Jira's supported set (`typescript`→`javascript`, `dockerfile`→`bash`, unknown → plain `{code}`); content containing `{code` uses `{noformat}` instead |
+| Lists (`-`/`*`/`+`, `1.`/`1)`, nested, mixed) | `*` / `#` runs (`**`, `##`, `#*`, …) |
+| `> quote` (single line / multi-line) | `bq.` / `{quote}…{quote}` |
+| `[text](url)`, reference links, autolinks, titles | `[text\|url]` or `[text\|url\|title]` |
+| `![alt](url)` | `!url\|alt=alt!` (alt sanitized: `!`, `\|`, `,` removed/replaced) |
+| GFM tables (alignment rows, escaped pipes) | `\|\|header\|\|` / `\|cell\|` rows |
+| `---` horizontal rule | `----` |
+| Hard break / `<br>` | `\\` (in table cells: `\\` without newline, so the row survives) |
+| Soft break | kept as newline (Jira preserves single newlines) |
+| Inline HTML `<sup>` `<sub>` `<ins>`/`<u>` `<del>`/`<s>` `<cite>`/`<q>` `<b>` `<i>` | `^x^` `~x~` `+x+` `-x-` `??x??` `*x*` `_x_` |
+| `<span style="color:red">` / `<font color=…>` | `{color:red}…{color}` |
+| `[~user]`, `[~accountid:…]`, `** nested` Jira lists | passed through verbatim |
+
+### Escaping rules (renderer-verified)
+
+| Context | Characters | Mechanism |
+|---|---|---|
+| Prose `{` `}` | always | HTML entity (backslash provably fails on doubled braces; spaced `{ x }` splits the paragraph) |
+| Prose `*` `_` | when touching non-whitespace | backslash (older Jira applies emphasis intraword — snake_case italics; escapes render clean) |
+| Prose `-` `+` `^` `~` | only at word-boundary positions | backslash — `well-known`, `2024-01-15`, `C++`, `x^2` stay readable |
+| Prose `[` `]` | when touching non-whitespace | backslash |
+| Emoticons `:)` `:(` `;)` `:P` `:D` `(y)` `(n)` `(i)` `(/)` `(x)` `(!)` `(?)` `(+)` `(-)` `(*)` `(on)` `(off)` `(flag)` | exact tokens | first character becomes an entity — displays identically (`f(x)` stays `f(x)`), Jira's icon substitution is stopped |
+| Line-start tokens in paragraphs: `h1.`–`h6.`, `bq.`, `\|`, `--` runs | first line and soft-broken continuation lines | entity on the recognizing character (`h2&#46;`) |
+| Inline code content | **everything**: `&` `{}` `[]` `*` `_` `-` `+` `^` `~` `\|` `!` `?` | HTML entities — the only representation Jira passes through verbatim inside `{{...}}`; `&` first so pre-existing entity-like text stays literal |
+| Bare URLs | none (escapes break Jira's autolinking); `{` `}` → `%7B`/`%7D` (Jira macro-parses braces even inside URLs) | percent-encoding |
+| Link text | `\|` → `&#124;` (the alias separator cannot be escaped) | entity |
+| Table cell text | literal `\|` → `&#124;`; structural pipes from `[text\|url]` links untouched | entity |
+| Code block content | nothing — `{code}` content is literal | — |
+
+### Known degradations (unrepresentable in Jira)
+
+- **Attached superscript/subscript**: `mc<sup>2</sup>` renders as
+  `mc^2^` caret notation — Jira's `^x^`/`~x~` require word boundaries.
+- **Intraword emphasis**: `2*3*4` displays as the literal characters,
+  not italic "3".
+- **Code containing both `{code}` and `{noformat}`**: kept as `{code}`;
+  Jira offers no escaping inside either block.
+- **Multi-paragraph list items**: continuation paragraphs lose their
+  list attachment (a Jira list limitation).
+
+## Read path: wiki markup → Markdown
+
+`jira_to_markdown` uses [jira2markdown](https://github.com/catcombo/jira2markdown)
+(a pyparsing grammar) with three custom elements: `{code}` without the
+library's "Java" default language, and fence/backtick delimiters sized
+past any backtick run in the content so round trips stay parseable;
+`{{...}}` decodes HTML entities so the write path's encoding round-trips
+to the original characters. Results are memoized (LRU), and inputs over
+20k characters or parse failures fall back to a fast regex pipeline.
+`clean_jira_text` additionally resolves mentions and smart links and
+shields Markdown links, autolinks, and inline formatting tags from the
+HTML cleanup pass.
+
+## Validation
+
+Three layers, run in CI order of cost:
+
+1. **Exact-output unit tests** —
+   `tests/unit/preprocessing/test_preprocessing.py`.
+2. **Structural output linting** —
+   `tests/unit/preprocessing/test_jira_markup_validity.py` converts a
+   hostile corpus and lints the output for damage (leftover backticks,
+   merged braces, unbalanced macros, broken table rows, leaked
+   placeholders).
+3. **Real-renderer oracle** — `tests/e2e/test_markup_rendering_dc.py`
+   renders 100+ converted cases through a live Jira DC wiki renderer
+   and asserts on **browser-visible text** (entity decoding included)
+   plus HTML structure and generic invariants.
+
+Run the renderer suite against the dockerized Jira DC:
+
+```bash
+cd tests/e2e/docker
+cp .env.example .env
+docker compose up -d jira-db jira
+bash setup-jira-wizard.sh     # fetches the free timebomb license and
+                              # completes the setup wizard - no browser
+cd ../../..
+uv run pytest tests/e2e/test_markup_rendering_dc.py --dc-e2e -v
+```
+
+The wizard script obtains Atlassian's **public timebomb license**
+(Jira Software Data Center, 10 users, valid 3 hours — free, no account)
+via `tests/e2e/docker/get-jira-license.sh`, which you can also run on
+its own. Manual copies live on
+[Atlassian's testing-licenses page](https://developer.atlassian.com/platform/marketplace/timebomb-licenses-for-testing-server-apps/).
+Only Jira is needed for these tests; Confluence can stay down.
+
+When changing conversion behavior: probe the renderer first (the
+`/rest/api/1.0/render` endpoint accepts raw wiki markup and returns the
+HTML Jira produces), then encode the verified behavior in all three
+layers and update the tables on this page.

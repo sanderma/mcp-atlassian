@@ -1769,7 +1769,7 @@ class TestMarkdownToJiraParser:
         assert "{{my&#95;var &#45;&#45;dry&#45;run}}" in result
 
     def test_inline_code_with_leading_brace(self, preprocessor):
-        """Macro braces in inline code become entities (issue #1).
+        """Macro braces in inline code become entities.
 
         Verified against Jira DC 10.3: space-padding ({{ {panel} }})
         renders literal outer braces AND executes the macro; only the

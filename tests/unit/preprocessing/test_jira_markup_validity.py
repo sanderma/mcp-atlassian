@@ -1,8 +1,9 @@
 """Structural validity harness for markdown_to_jira output.
 
 Unit tests assert exact conversions for known inputs; this harness
-attacks the class of bug that produced fork issues #1 and #2 — content
-colliding with the wiki-markup delimiters it gets wrapped in.  Every
+attacks a recurring class of bug — content colliding with the
+wiki-markup delimiters it gets wrapped in (macro names inside inline
+code, pipes inside table-cell code spans, and the like).  Every
 corpus document is converted and the *output* is linted for structural
 damage: leftover Markdown syntax, merged brace delimiters, unbalanced
 block macros, stray placeholder sentinels, or broken table rows.

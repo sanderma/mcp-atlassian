@@ -4,10 +4,10 @@ The unit suite asserts what the converter *emits*; these tests assert
 what Jira actually *renders* from it, using the wiki renderer of a live
 Jira DC instance as the oracle (``/rest/api/1.0/render`` — the endpoint
 the issue-preview UI uses).  This is what catches wrong assumptions
-about Jira's notoriously weird parsing: fork issue #1's proposed fix
-(space-padding braces in ``{{...}}``) passed every unit test and still
-rendered garbage; the entity encoding shipped instead was chosen by
-probing this renderer.
+about Jira's notoriously weird parsing: an earlier fix for macro names
+in inline code (space-padding braces in ``{{...}}``) passed every unit
+test and still rendered garbage; the entity encoding shipped instead
+was chosen by probing this renderer.
 
 Run with a Jira DC instance up (see tests/e2e/docker/README.md):
 

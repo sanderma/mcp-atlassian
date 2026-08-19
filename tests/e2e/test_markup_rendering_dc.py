@@ -530,6 +530,67 @@ CORPUS: list[Case] = [
         [],
     ),
     ("exclaim-prose", "wow! really!? yes!", ["wow! really!? yes!"], [], [], []),
+    # Emoticons: Jira eats the text and shows icons; the author's
+    # literal characters must survive
+    (
+        "emoticons-smilies",
+        "smile :) frown :( wink ;) tongue :P grin :D",
+        ["smile :) frown :( wink ;) tongue :P grin :D"],
+        [],
+        [],
+        ['class="emoticon"'],
+    ),
+    (
+        "emoticons-symbols",
+        "thumbs (y) down (n) info (i) check (/) cross (x) warn (!) q (?)",
+        ["thumbs (y) down (n) info (i) check (/) cross (x) warn (!) q (?)"],
+        [],
+        [],
+        ['class="emoticon"'],
+    ),
+    (
+        "emoticons-toggles",
+        "toggle (on) and (off) and flag (flag)",
+        ["toggle (on) and (off) and flag (flag)"],
+        [],
+        [],
+        ['class="emoticon"'],
+    ),
+    (
+        "math-parens",
+        "f(x) = y and item (i)",
+        ["f(x) = y and item (i)"],
+        [],
+        [],
+        ['class="emoticon"'],
+    ),
+    # Typographic dash conversion must not rewrite author text
+    ("dash-runs", "range 1 -- 2 and a --- b", ["range 1 -- 2 and a --- b"], [], [], []),
+    # Jira line-start tokens appearing as prose
+    (
+        "prose-h2-token",
+        "h2. is the heading syntax",
+        ["h2. is the heading syntax"],
+        [],
+        [],
+        ["<h2"],
+    ),
+    (
+        "prose-bq-token",
+        "bq. means blockquote",
+        ["bq. means blockquote"],
+        [],
+        [],
+        ["<blockquote"],
+    ),
+    (
+        "prose-continuation-tokens",
+        "note this:\nh3. not a heading\nbq. not a quote",
+        ["h3. not a heading", "bq. not a quote"],
+        [],
+        [],
+        ["<h3", "<blockquote"],
+    ),
     # --- jira passthrough ---
     ("mention", "ping [~admin] now", ["Admin"], [], ["user-hover"], []),
     ("issue-key", "see E2E-1 there", ["E2E-1"], [], [], []),

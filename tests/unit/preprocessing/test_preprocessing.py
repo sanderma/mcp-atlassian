@@ -1863,8 +1863,9 @@ class TestMarkdownToJiraParser:
         result = preprocessor.markdown_to_jira(md)
         assert "{{&#91;text&#124;url&#93;}}" in result
         assert "`" not in result
-        # The row keeps exactly two cells
-        assert "|(?)|{{&#91;text&#124;url&#93;}} test|" in result
+        # The row keeps exactly two cells; "(?)" is neutralized so it
+        # displays literally instead of becoming Jira's help emoticon
+        assert "|&#40;?)|{{&#91;text&#124;url&#93;}} test|" in result
 
     def test_pre_escaped_pipe_in_table_code_span(self, preprocessor):
         """A GFM-correct \\| inside a cell's code span works the same."""
@@ -2065,3 +2066,31 @@ class TestRendererValidatedEscaping:
     def test_link_target_not_touched_by_emphasis_repair(self, preprocessor):
         result = preprocessor.markdown_to_jira("[doc](https://x.test/a_b_c)")
         assert result == "[doc|https://x.test/a_b_c]"
+
+    def test_emoticons_neutralized(self, preprocessor):
+        """Jira turns :) (y) (x) (on) ... into icons, eating the text;
+        entity-encoding the first character keeps the author's text."""
+        result = preprocessor.markdown_to_jira("smile :) check (/) cross (x)")
+        assert result == "smile &#58;) check &#40;/) cross &#40;x)"
+
+    def test_math_parens_display_unchanged(self, preprocessor):
+        """f(x) is matched by the emoticon guard but still displays
+        as f(x) - the entity only stops the icon substitution."""
+        result = preprocessor.markdown_to_jira("f(x) = y")
+        assert result == "f&#40;x) = y"
+
+    def test_line_start_heading_token_neutralized(self, preprocessor):
+        """Prose beginning with h2. / bq. must not become markup."""
+        assert (
+            preprocessor.markdown_to_jira("h2. is the heading syntax")
+            == "h2&#46; is the heading syntax"
+        )
+        assert (
+            preprocessor.markdown_to_jira("bq. means blockquote")
+            == "bq&#46; means blockquote"
+        )
+
+    def test_line_start_tokens_on_continuation_lines(self, preprocessor):
+        """Soft-broken paragraph lines are line starts for Jira too."""
+        result = preprocessor.markdown_to_jira("note this:\nh3. not a heading")
+        assert "h3&#46; not a heading" in result

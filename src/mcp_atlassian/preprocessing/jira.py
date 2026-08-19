@@ -206,6 +206,33 @@ _HTML_TAG_MARKERS = {
 _HTML_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s[^>]*?)?)/?>")
 _COLOR_ATTR_RE = re.compile(r"color\s*[:=]\s*[\"']?(#?\w+)")
 
+# Jira replaces these tokens with emoticon images, destroying the
+# author's literal text; Markdown has no emoticon syntax, so they are
+# neutralized by entity-encoding the first character.
+_EMOTICON_RE = re.compile(
+    r"[:;]\)|:\(|:[PDpd]\b"
+    r"|\((?:y|n|i|/|x|!|\?|\+|-|on|off|\*[rgby]?|flag|flagoff)\)"
+)
+_EMOTICON_LEAD_ENTITY = {":": "&#58;", ";": "&#59;", "(": "&#40;"}
+
+# Line-start tokens Jira interprets even in the middle of a paragraph:
+# headings (h2.), block quotes (bq.), table rows (|), and typographic
+# dash runs (-- / ---) or rulers (----).
+_LINE_START_NEUTRALIZERS = [
+    (re.compile(r"^(h[1-6])\.", re.IGNORECASE), r"\1&#46;"),
+    (re.compile(r"^bq\.", re.IGNORECASE), "bq&#46;"),
+    (re.compile(r"^\|"), "&#124;"),
+    (re.compile(r"^-(-+)"), r"&#45;\1"),
+]
+
+
+def _neutralize_line_start(line: str) -> str:
+    for pattern, replacement in _LINE_START_NEUTRALIZERS:
+        new_line, count = pattern.subn(replacement, line, count=1)
+        if count:
+            return new_line
+    return line
+
 
 def _convert_panel(params: str | None, content: str) -> str:
     """Convert a Jira {panel} block to markdown (regex fallback path)."""
@@ -511,7 +538,19 @@ class JiraMarkupRenderer(JiraRenderer):
             escaped = escaped.replace("|", "&#124;")
         return escaped
 
+    def render_paragraph(self, token: Any) -> str:
+        # Soft breaks keep author line breaks, so continuation lines
+        # sit at line start where Jira would interpret h2. / bq. / |
+        # / -- tokens; neutralize them (the first line included — a
+        # paragraph beginning with such a token is prose, not markup).
+        inner = self.render_inner(token)
+        inner = "\n".join(_neutralize_line_start(ln) for ln in inner.split("\n"))
+        return inner + self._block_eol(token)
+
     def _escape_segment(self, text: str) -> str:
+        text = _EMOTICON_RE.sub(
+            lambda m: _EMOTICON_LEAD_ENTITY[m.group(0)[0]] + m.group(0)[1:], text
+        )
         length = len(text)
         result: list[str] = []
         for i, char in enumerate(text):

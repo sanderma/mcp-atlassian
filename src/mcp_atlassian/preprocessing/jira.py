@@ -495,6 +495,19 @@ def _regex_jira_to_markdown(input_text: str) -> str:
         "J2MMENTION",
     )
 
+    # URLs are not markup. The text-effect rules below would read the
+    # underscores in "a_(b)_c" as emphasis and rewrite them, adding a
+    # star per cycle until the link is unrecognisable. The pattern stops
+    # at "]" and "|" so [text|url] links still convert.
+    urls: list[str] = []
+    output = _extract_blocks(
+        output,
+        r"https?://[^\s\]|]+",
+        lambda m: m.group(0),
+        urls,
+        "J2MURL",
+    )
+
     # Block quotes
     output = re.sub(r"^bq\.(.*?)$", r"> \1\n", output, flags=re.MULTILINE)
 
@@ -595,6 +608,7 @@ def _regex_jira_to_markdown(input_text: str) -> str:
     output = _decode_prose_entities(output)
 
     # Restore code/noformat blocks and inline code
+    output = _restore_blocks(output, urls, "J2MURL")
     output = _restore_blocks(output, mentions, "J2MMENTION")
     output = _restore_blocks(output, code_blocks, "CODEBLOCK")
     output = _restore_blocks(output, inline_codes, "INLINECODE")

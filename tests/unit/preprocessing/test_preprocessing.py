@@ -2164,6 +2164,29 @@ ROUND_TRIP_CORPUS = [
     ("escaped-hash", "\\# hash"),
     ("html-tag", "use <div> tag"),
     ("mixed", "# T\n\n**b** `c{d}` [l](https://e.com)\n\n- x*y\n"),
+    # Shapes an incident write-up or a runbook actually takes.
+    (
+        "nested-list-code",
+        "- step one\n  - run `npm ci --no-audit`\n  - then:\n\n    ```sh\n"
+        "    make test\n    ```\n",
+    ),
+    (
+        "table-links-code",
+        "| env | cmd | doc |\n|---|---|---|\n"
+        "| prod | `kubectl -n a get po` | [rb](https://x.test/a_b) |\n",
+    ),
+    ("deep-quote", "> outer\n>\n> > inner with `code`\n"),
+    ("checklist", "- [x] done `a|b`\n- [ ] todo **bold**\n"),
+    ("html-mix", "text with <sup>2</sup> and <sub>i</sub> and <del>gone</del>\n"),
+    ("regex-heavy", "match `^(foo|bar)+$` and `\\d{2,3}` and `a[b-c]*`\n"),
+    ("path-heavy", "see `C:\\Users\\x\\a_b.txt` and /var/log/*.log\n"),
+    ("money-math", "cost: $1,000 * 1.21 = $1,210 (~21%)\n"),
+    ("arrows", "a -> b => c <- d, x--y, a---b\n"),
+    ("urls", "https://x.test/a_(b)_c and <https://x.test/d?e=f&g=h>\n"),
+    ("emphasis-edge", "*start* mid *end*, _a_b_c_, **a**b**c**\n"),
+    ("colon-heavy", "Note: h2. is a heading; bq. is a quote; |a| is a row\n"),
+    ("braces", "use {{ x }} and {code} and ${VAR} and {{{deep}}}\n"),
+    ("mixed-inline", "**bold `code` [link](https://x.test) ~~strike~~ _it_**\n"),
 ]
 
 

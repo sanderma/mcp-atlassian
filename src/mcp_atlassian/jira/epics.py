@@ -11,6 +11,7 @@ from .protocols import (
     SearchOperationsProto,
     UsersOperationsProto,
 )
+from .scope import apply_jql_filter
 
 logger = logging.getLogger("mcp-jira")
 
@@ -44,7 +45,9 @@ class EpicsMixin(
 
             # Find an Epic in the system
             epics_jql = "issuetype = Epic ORDER BY created DESC"
-            results = self.jira.jql(epics_jql, fields="*all", limit=1)
+            results = self.jira.jql(
+                apply_jql_filter(epics_jql, self.config), fields="*all", limit=1
+            )
             if not isinstance(results, dict):
                 msg = f"Unexpected return value type from `jira.jql`: {type(results)}"
                 logger.error(msg)
@@ -784,7 +787,7 @@ class EpicsMixin(
         try:
             # Search for issues with type=Epic
             jql = "issuetype = Epic ORDER BY updated DESC"
-            response = self.jira.jql(jql, limit=1)
+            response = self.jira.jql(apply_jql_filter(jql, self.config), limit=1)
             if not isinstance(response, dict):
                 msg = f"Unexpected return value type from `jira.jql`: {type(response)}"
                 logger.error(msg)
@@ -815,7 +818,9 @@ class EpicsMixin(
                 f"issueFunction in issuesScopedToEpic('{epic_key}')",
             ]:
                 try:
-                    response = self.jira.jql(query, limit=5)
+                    response = self.jira.jql(
+                        apply_jql_filter(query, self.config), limit=5
+                    )
                     if not isinstance(response, dict):
                         msg = f"Unexpected return value type from `jira.jql`: {type(response)}"
                         logger.error(msg)

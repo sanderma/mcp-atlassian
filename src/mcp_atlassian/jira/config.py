@@ -39,6 +39,18 @@ def normalize_project_key(raw: str) -> str:
     return raw.translate(_INVISIBLE_CHARS).strip().upper()
 
 
+def _clean_optional(raw: str | None) -> str | None:
+    """Normalize an optional env value: blank/whitespace-only becomes None.
+
+    Keeps "set but empty" indistinguishable from "unset" so an empty
+    JIRA_JQL_FILTER cannot accidentally produce an invalid JQL clause.
+    """
+    if raw is None:
+        return None
+    cleaned = raw.strip()
+    return cleaned or None
+
+
 def _parse_internal_only_projects(raw: str | None) -> frozenset[str]:
     """Parse JIRA_INTERNAL_ONLY_PROJECTS into a set of normalized project keys.
 
@@ -170,6 +182,8 @@ class JiraConfig:
     oauth_config: OAuthConfig | BYOAccessTokenOAuthConfig | None = None
     ssl_verify: bool = True  # Whether to verify SSL certificates
     projects_filter: str | None = None  # List of project keys to filter searches
+    jql_filter: str | None = None  # JQL ANDed into every query (read boundary)
+    write_jql_filter: str | None = None  # JQL an issue must match to be writable
     http_proxy: str | None = None  # HTTP proxy URL
     https_proxy: str | None = None  # HTTPS proxy URL
     no_proxy: str | None = None  # Comma-separated list of hosts to bypass proxy
@@ -330,6 +344,14 @@ class JiraConfig:
         # Get the projects filter if provided
         projects_filter = os.getenv("JIRA_PROJECTS_FILTER")
 
+        # Scope filters. JIRA_JQL_FILTER is the read boundary: it is ANDed
+        # into every JQL query and gates direct issue reads.
+        # JIRA_WRITE_JQL_FILTER narrows *within* that boundary: an issue must
+        # match it for write tools to modify it, so everything readable but
+        # unmatched is effectively read-only.
+        jql_filter = _clean_optional(os.getenv("JIRA_JQL_FILTER"))
+        write_jql_filter = _clean_optional(os.getenv("JIRA_WRITE_JQL_FILTER"))
+
         # Internal-only projects: server-side guard forcing
         # jira_add_comment/jira_edit_comment to internal (non-customer-visible)
         # comments for these JSM project keys. Unset/empty = no-op.
@@ -368,6 +390,8 @@ class JiraConfig:
             oauth_config=oauth_config,
             ssl_verify=ssl_verify,
             projects_filter=projects_filter,
+            jql_filter=jql_filter,
+            write_jql_filter=write_jql_filter,
             http_proxy=proxy_settings["http_proxy"],
             https_proxy=proxy_settings["https_proxy"],
             no_proxy=proxy_settings["no_proxy"],

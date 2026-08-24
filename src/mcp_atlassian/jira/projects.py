@@ -8,6 +8,7 @@ from ..models.jira.search import JiraSearchResult
 from ..models.jira.version import JiraVersion
 from .client import JiraClient
 from .protocols import SearchOperationsProto
+from .scope import apply_jql_filter
 
 logger = logging.getLogger("mcp-jira")
 
@@ -525,7 +526,9 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
         try:
             # Use JQL to count issues in the project
             jql = f'project = "{project_key}"'
-            result = self.jira.jql(jql=jql, fields="key", limit=1)
+            result = self.jira.jql(
+                jql=apply_jql_filter(jql, self.config), fields="key", limit=1
+            )
             if not isinstance(result, dict):
                 msg = f"Unexpected return value type from `jira.jql`: {type(result)}"
                 logger.error(msg)

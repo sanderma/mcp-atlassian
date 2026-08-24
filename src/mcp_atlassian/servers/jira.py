@@ -20,6 +20,7 @@ from mcp_atlassian.servers.async_utils import run_jira_fetcher_call
 from mcp_atlassian.servers.dependencies import get_jira_fetcher
 from mcp_atlassian.servers.error_handling import ErrorPreservingFastMCP
 from mcp_atlassian.servers.helpers import resolve_transition
+from mcp_atlassian.servers.scope import enforce_issue_scope, enforce_link_scope
 from mcp_atlassian.utils.decorators import check_write_access
 from mcp_atlassian.utils.env import get_regex_env
 from mcp_atlassian.utils.media import (
@@ -336,6 +337,7 @@ async def get_user_profile(
     tags={"jira", "read", "toolset:jira_users"},
     annotations={"title": "Search Assignable Users", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def search_assignable_users(
     ctx: Context,
     query: Annotated[
@@ -456,6 +458,7 @@ async def search_assignable_users(
     tags={"jira", "read", "toolset:jira_watchers"},
     annotations={"title": "Get Issue Watchers", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_issue_watchers(
     ctx: Context,
     issue_key: Annotated[
@@ -491,6 +494,7 @@ async def get_issue_watchers(
     },
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def add_watcher(
     ctx: Context,
     issue_key: Annotated[
@@ -536,6 +540,7 @@ async def add_watcher(
     },
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def remove_watcher(
     ctx: Context,
     issue_key: Annotated[
@@ -583,6 +588,7 @@ async def remove_watcher(
     tags={"jira", "read", "toolset:jira_issues"},
     annotations={"title": "Get Issue", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_issue(
     ctx: Context,
     issue_key: Annotated[
@@ -1144,6 +1150,7 @@ async def get_project_issues(
     tags={"jira", "read", "toolset:jira_transitions"},
     annotations={"title": "Get Transitions", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_transitions(
     ctx: Context,
     issue_key: Annotated[
@@ -1173,6 +1180,7 @@ async def get_transitions(
     tags={"jira", "read", "toolset:jira_worklog"},
     annotations={"title": "Get Worklog", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_worklog(
     ctx: Context,
     issue_key: Annotated[
@@ -1202,6 +1210,7 @@ async def get_worklog(
     tags={"jira", "read", "toolset:jira_attachments"},
     annotations={"title": "Download Attachments", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def download_attachments(
     ctx: Context,
     issue_key: Annotated[
@@ -1336,6 +1345,7 @@ async def download_attachments(
     tags={"jira", "read", "attachments", "toolset:jira_attachments"},
     annotations={"title": "Get Issue Images", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_issue_images(
     ctx: Context,
     issue_key: Annotated[
@@ -1919,6 +1929,7 @@ async def batch_create_issues(
     tags={"jira", "read", "toolset:jira_issues"},
     annotations={"title": "Batch Get Changelogs", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_ids_or_keys", access="read")
 async def batch_get_changelogs(
     ctx: Context,
     issue_ids_or_keys: Annotated[
@@ -2001,6 +2012,7 @@ async def batch_get_changelogs(
     annotations={"title": "Update Issue", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def update_issue(
     ctx: Context,
     issue_key: Annotated[
@@ -2300,6 +2312,7 @@ async def update_issue(
     annotations={"title": "Assign Issue", "readOnlyHint": False},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def assign_issue(
     ctx: Context,
     issue_key: Annotated[
@@ -2372,6 +2385,7 @@ async def assign_issue(
     annotations={"title": "Delete Issue", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def delete_issue(
     ctx: Context,
     issue_key: Annotated[
@@ -2406,6 +2420,7 @@ async def delete_issue(
     annotations={"title": "Move Issue to Project", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def move_issue(
     ctx: Context,
     issue_key: Annotated[
@@ -2478,6 +2493,7 @@ async def move_issue(
     annotations={"title": "Add Comment", "destructiveHint": False},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def add_comment(
     ctx: Context,
     issue_key: Annotated[
@@ -2571,6 +2587,7 @@ async def add_comment(
     annotations={"title": "Edit Comment", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def edit_comment(
     ctx: Context,
     issue_key: Annotated[
@@ -2618,6 +2635,7 @@ async def edit_comment(
     annotations={"title": "Add Worklog", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def add_worklog(
     ctx: Context,
     issue_key: Annotated[
@@ -2694,6 +2712,8 @@ async def add_worklog(
     annotations={"title": "Link to Epic", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
+@enforce_issue_scope("epic_key", access="read")
 async def link_to_epic(
     ctx: Context,
     issue_key: Annotated[
@@ -2738,6 +2758,7 @@ async def link_to_epic(
     annotations={"title": "Create Issue Link", "destructiveHint": False},
 )
 @check_write_access
+@enforce_issue_scope("inward_issue_key", "outward_issue_key", access="write")
 async def create_issue_link(
     ctx: Context,
     link_type: Annotated[
@@ -2834,6 +2855,7 @@ async def create_issue_link(
     annotations={"title": "Create Remote Issue Link", "destructiveHint": False},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def create_remote_issue_link(
     ctx: Context,
     issue_key: Annotated[
@@ -2922,6 +2944,7 @@ async def create_remote_issue_link(
     annotations={"title": "Remove Issue Link", "destructiveHint": True},
 )
 @check_write_access
+@enforce_link_scope("link_id", access="write")
 async def remove_issue_link(
     ctx: Context,
     link_id: Annotated[str, Field(description="The ID of the link to remove")],
@@ -2951,6 +2974,7 @@ async def remove_issue_link(
     annotations={"title": "Transition Issue", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def transition_issue(
     ctx: Context,
     issue_key: Annotated[
@@ -3144,6 +3168,7 @@ async def update_sprint(
     annotations={"title": "Add Issues to Sprint", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_keys", access="write")
 async def add_issues_to_sprint(
     ctx: Context,
     sprint_id: Annotated[str, Field(description="Sprint ID to add issues to")],
@@ -3181,6 +3206,7 @@ async def add_issues_to_sprint(
     annotations={"title": "Move Issues to Backlog", "readOnlyHint": False},
 )
 @check_write_access
+@enforce_issue_scope("issue_keys", access="write")
 async def move_issues_to_backlog(
     ctx: Context,
     issue_keys: Annotated[
@@ -4076,6 +4102,7 @@ async def update_version(
     tags={"jira", "read", "toolset:jira_forms"},
     annotations={"title": "Get Issue Forms", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_issue_proforma_forms(
     ctx: Context,
     issue_key: Annotated[str, Field(description="Jira issue key (e.g., 'PROJ-123')")],
@@ -4131,6 +4158,7 @@ async def get_issue_proforma_forms(
     tags={"jira", "read", "toolset:jira_forms"},
     annotations={"title": "Get Form Details", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_proforma_form_details(
     ctx: Context,
     issue_key: Annotated[str, Field(description="Jira issue key (e.g., 'PROJ-123')")],
@@ -4202,6 +4230,7 @@ async def get_proforma_form_details(
     annotations={"title": "Update Form Answers", "destructiveHint": True},
 )
 @check_write_access
+@enforce_issue_scope("issue_key", access="write")
 async def update_proforma_form_answers(
     ctx: Context,
     issue_key: Annotated[str, Field(description="Jira issue key (e.g., 'PROJ-123')")],
@@ -4331,6 +4360,7 @@ async def update_proforma_form_answers(
     tags={"jira", "read", "metrics", "toolset:jira_metrics"},
     annotations={"title": "Get Issue Dates", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_issue_dates(
     ctx: Context,
     issue_key: Annotated[
@@ -4388,6 +4418,7 @@ async def get_issue_dates(
     tags={"jira", "read", "metrics", "sla", "toolset:jira_metrics"},
     annotations={"title": "Get Issue SLA", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_issue_sla(
     ctx: Context,
     issue_key: Annotated[
@@ -4469,6 +4500,7 @@ async def get_issue_sla(
     tags={"jira", "read", "development", "toolset:jira_development"},
     annotations={"title": "Get Issue Development Info", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_key", access="read")
 async def get_issue_development_info(
     ctx: Context,
     issue_key: Annotated[str, Field(description="Jira issue key (e.g., 'PROJ-123')")],
@@ -4531,6 +4563,7 @@ async def get_issue_development_info(
     tags={"jira", "read", "development", "toolset:jira_development"},
     annotations={"title": "Get Issues Development Info", "readOnlyHint": True},
 )
+@enforce_issue_scope("issue_keys", access="read")
 async def get_issues_development_info(
     ctx: Context,
     issue_keys: Annotated[

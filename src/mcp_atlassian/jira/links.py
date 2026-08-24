@@ -260,6 +260,40 @@ class LinksMixin(JiraClient):
             raise Exception(msg) from e
 
     @handle_auth_errors("Jira API")
+    def get_issue_link(self, link_id: str) -> dict[str, Any]:
+        """Fetch a single issue link by id.
+
+        Used to resolve a link to the issues it connects so scope
+        boundaries can be applied before the link is removed.
+
+        Args:
+            link_id: The ID of the link
+
+        Returns:
+            The raw issue link payload (contains ``inwardIssue`` and
+            ``outwardIssue``)
+
+        Raises:
+            ValueError: If link_id is empty or the response is malformed
+        """
+        if not link_id:
+            raise ValueError("Link ID is required")
+
+        response = self.jira.get(f"rest/api/2/issueLink/{link_id}")
+        if not isinstance(response, dict):
+            msg = f"Unexpected response for issue link {link_id}: {type(response)}"
+            raise ValueError(msg)
+        return response
+
+    def issue_keys_for_link(self, link_id: str) -> list[str]:
+        """Issue keys on both ends of an issue link."""
+        link = self.get_issue_link(link_id)
+        keys = [
+            link.get(side, {}).get("key") for side in ("inwardIssue", "outwardIssue")
+        ]
+        return [key for key in keys if key]
+
+    @handle_auth_errors("Jira API")
     def remove_issue_link(self, link_id: str) -> dict[str, Any]:
         """
         Remove a link between two issues.

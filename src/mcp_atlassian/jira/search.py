@@ -1,7 +1,6 @@
 """Module for Jira search operations."""
 
 import logging
-import re
 from typing import Any
 
 import requests
@@ -13,6 +12,7 @@ from ..utils.pagination import clamp_limit
 from .client import JiraClient
 from .constants import DEFAULT_READ_JIRA_FIELDS
 from .protocols import IssueOperationsProto
+from .scope import and_jql_clause, apply_jql_filter
 from .utils import quote_jql_identifier_if_needed, sanitize_jql_reserved_words
 
 logger = logging.getLogger("mcp-jira")
@@ -21,15 +21,25 @@ logger = logging.getLogger("mcp-jira")
 class SearchMixin(JiraClient, IssueOperationsProto):
     """Mixin for Jira search operations."""
 
+    def _apply_read_scope(self, jql: str, projects_filter: str | None = None) -> str:
+        """Constrain a JQL query to the configured read scope.
+
+        Applies both operator boundaries: the project allowlist
+        (``JIRA_PROJECTS_FILTER``) and the read JQL filter
+        (``JIRA_JQL_FILTER``). Every JQL-issuing path routes through here so
+        none can escape them.
+        """
+        jql = self._apply_projects_filter(jql, projects_filter)
+        return apply_jql_filter(jql, self.config)
+
     def _apply_projects_filter(
         self, jql: str, projects_filter: str | None = None
     ) -> str:
         """Constrain a JQL query to the allowed projects (JIRA_PROJECTS_FILTER).
 
-        Every JQL-issuing path routes through here so none can escape the project
-        allowlist. ``config.projects_filter`` is a hard boundary and is always
-        applied; a caller-supplied ``projects_filter`` may only *narrow* within it
-        (both are ANDed), never replace it — otherwise the tool argument would
+        ``config.projects_filter`` is a hard boundary and is always applied; a
+        caller-supplied ``projects_filter`` may only *narrow* within it (both
+        are ANDed), never replace it — otherwise the tool argument would
         defeat the operator's allowlist in shared-credential deployments.
         """
         for filter_str in (self.config.projects_filter, projects_filter):
@@ -48,26 +58,11 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             quoted_projects = [quote_jql_identifier_if_needed(p) for p in projects]
             projects_list = ", ".join(quoted_projects)
             project_query = f"project IN ({projects_list})"
-        grouped_project_query = f"({project_query})"
-
-        if not jql:
-            jql = project_query
-        elif jql.strip().upper().startswith("ORDER BY"):
-            jql = f"{project_query} {jql}"
-        else:
-            # Always AND the allowlist, even when the caller's query already names a
-            # project: a caller-supplied `project = X` must not be able to escape the
-            # configured allowlist (out-of-allowlist queries then return empty).
-            # Extract a trailing ORDER BY so the AND does not produce invalid JQL.
-            order_match = re.search(r"\s+(ORDER\s+BY\s+.*)$", jql, re.IGNORECASE)
-            if order_match:
-                order_clause = order_match.group(1)
-                jql_without_order = jql[: order_match.start()]
-                jql = (
-                    f"({jql_without_order}) AND {grouped_project_query} {order_clause}"
-                )
-            else:
-                jql = f"({jql}) AND {grouped_project_query}"
+        # Always AND the allowlist, even when the caller's query already names a
+        # project: a caller-supplied `project = X` must not be able to escape the
+        # configured allowlist (out-of-allowlist queries then return empty).
+        # and_jql_clause keeps a trailing ORDER BY outside the AND.
+        jql = and_jql_clause(jql, project_query)
 
         logger.info(f"Applied projects filter to query: {jql}")
         return jql
@@ -113,8 +108,9 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             # Sanitize JQL reserved words in project key values
             jql = sanitize_jql_reserved_words(jql)
 
-            # Constrain to the allowed projects (JIRA_PROJECTS_FILTER)
-            jql = self._apply_projects_filter(jql, projects_filter)
+            # Constrain to the configured read scope
+            # (JIRA_PROJECTS_FILTER + JIRA_JQL_FILTER)
+            jql = self._apply_read_scope(jql, projects_filter)
 
             # Convert fields to proper format if it's a list/tuple/set
             fields_param: str | None
@@ -252,8 +248,8 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             # Sanitize JQL reserved words in project key values
             jql = sanitize_jql_reserved_words(jql) or jql
 
-            # Constrain board issues to the allowed projects (JIRA_PROJECTS_FILTER)
-            jql = self._apply_projects_filter(jql)
+            # Constrain board issues to the configured read scope
+            jql = self._apply_read_scope(jql)
 
             # Determine fields_param
             fields_param = fields

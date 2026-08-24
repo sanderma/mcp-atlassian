@@ -195,6 +195,21 @@ async def _run_stdio_with_stdin_guard(run_kwargs: dict[str, object]) -> None:
     help="Comma-separated list of Jira project keys to filter search results",
 )
 @click.option(
+    "--jira-jql-filter",
+    help=(
+        "JQL ANDed into every Jira query and required of any issue read by "
+        "key (read boundary), e.g. 'project = PROJ AND labels = agent'"
+    ),
+)
+@click.option(
+    "--jira-write-jql-filter",
+    help=(
+        "JQL an issue must match before a write tool may modify it "
+        "(write boundary), e.g. 'team = ours'. Readable issues that do not "
+        "match are read-only."
+    ),
+)
+@click.option(
     "--read-only",
     is_flag=True,
     help="Run in read-only mode (disables all write operations)",
@@ -253,6 +268,8 @@ def main(
     jira_personal_token: str | None,
     jira_ssl_verify: bool,
     jira_projects_filter: str | None,
+    jira_jql_filter: str | None,
+    jira_write_jql_filter: str | None,
     read_only: bool,
     enabled_tools: str | None,
     toolsets: str | None,
@@ -413,6 +430,10 @@ def main(
         os.environ["JIRA_SSL_VERIFY"] = str(jira_ssl_verify).lower()
     if click_ctx and was_option_provided(click_ctx, "jira_projects_filter"):
         os.environ["JIRA_PROJECTS_FILTER"] = jira_projects_filter
+    if click_ctx and was_option_provided(click_ctx, "jira_jql_filter"):
+        os.environ["JIRA_JQL_FILTER"] = jira_jql_filter
+    if click_ctx and was_option_provided(click_ctx, "jira_write_jql_filter"):
+        os.environ["JIRA_WRITE_JQL_FILTER"] = jira_write_jql_filter
 
     from mcp_atlassian.servers import main_mcp
 

@@ -148,7 +148,9 @@ Post-processing (outside code spans and fences):
   reader sees the character Jira displays.
 
 Results are memoized (LRU), and inputs over 20k characters or parse
-failures fall back to a fast regex pipeline. `clean_jira_text`
+failures fall back to a fast regex pipeline. That fallback carries the
+same stability guarantee — long descriptions are common on Data Center,
+and it is covered by the same corpus. `clean_jira_text`
 additionally resolves mentions and smart links and shields Markdown
 links, autolinks, and inline formatting tags from the HTML cleanup pass.
 
@@ -165,7 +167,8 @@ edits one line, and writes it back; without stability the untouched
 parts of the description drift a little on every edit. It is enforced by
 `TestRoundTripStability` (a 50+ case corpus, unit) and
 `test_round_trip_renders_identically` (the same cycle plus a live
-renderer diff of the visible text, e2e).
+renderer diff of the visible text, e2e). The unit corpus runs twice:
+once through the parser, once through the regex fallback.
 
 Known first-cycle losses — stable afterwards, but not reversible:
 

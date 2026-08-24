@@ -72,23 +72,29 @@ class _Noformat(Noformat):
         return f"{fence}\n{text}\n{fence}"
 
 
-class _Monospaced(Monospaced):
-    """{{...}} conversion emitting valid spans for backtick content.
+def _monospace_to_code_span(content: str) -> str:
+    """Render Jira {{monospace}} content as a Markdown code span.
 
     Decodes HTML entities (the write direction encodes special
     characters that way, and Jira displays them decoded), so a round
-    trip yields the characters the author wrote.
+    trip yields the characters the author wrote, and sizes the
+    delimiters past any backtick run in the content.
     """
+    content = html.unescape(content)
+    if "`" not in content:
+        return f"`{content}`"
+    longest = max(len(run) for run in re.findall(r"`+", content))
+    delim = "`" * (longest + 1)
+    # CommonMark strips one leading/trailing space pad, which is
+    # required when the content starts or ends with a backtick
+    return f"{delim} {content} {delim}"
+
+
+class _Monospaced(Monospaced):
+    """{{...}} conversion emitting valid spans for backtick content."""
 
     def action(self, tokens: ParseResults) -> str:
-        content = html.unescape(str(tokens[0]))
-        if "`" not in content:
-            return f"`{content}`"
-        longest = max(len(m) for m in re.findall(r"`+", content))
-        delim = "`" * (longest + 1)
-        # CommonMark strips one leading/trailing space pad, which is
-        # required when the content starts or ends with a backtick
-        return f"{delim} {content} {delim}"
+        return _monospace_to_code_span(str(tokens[0]))
 
 
 class _Image(Image):
@@ -450,7 +456,9 @@ def _regex_jira_to_markdown(input_text: str) -> str:
 
     def _jira_code_to_md(match: re.Match[str]) -> str:
         lang = match.group(1) or ""
-        content = match.group(2)
+        # The macro's own newlines are not content; keeping them would
+        # add a blank line to the block on every read-write cycle.
+        content = match.group(2).strip("\n")
         return f"```{lang}\n{content}\n```"
 
     output = _extract_blocks(
@@ -464,16 +472,27 @@ def _regex_jira_to_markdown(input_text: str) -> str:
     output = _extract_blocks(
         output,
         r"\{noformat\}([\s\S]*?)\{noformat\}",
-        lambda m: f"```\n{m.group(1)}\n```",
+        lambda m: f"```\n{m.group(1).strip(chr(10))}\n```",
         code_blocks,
         "CODEBLOCK",
     )
     output = _extract_blocks(
         output,
         r"\{\{([^}]+)\}\}",
-        lambda m: f"`{m.group(1)}`",
+        lambda m: _monospace_to_code_span(m.group(1)),
         inline_codes,
         "INLINECODE",
+    )
+
+    # Mentions have no Markdown equivalent; the write path passes them
+    # through, so the read path has to hand them back intact.
+    mentions: list[str] = []
+    output = _extract_blocks(
+        output,
+        _JIRA_MENTION_RE,
+        lambda m: m.group(0),
+        mentions,
+        "J2MMENTION",
     )
 
     # Block quotes
@@ -572,7 +591,11 @@ def _regex_jira_to_markdown(input_text: str) -> str:
         i += 1
     output = "\n".join(lines)
 
+    # Entities are literal inside {code}, which is still held aside here.
+    output = _decode_prose_entities(output)
+
     # Restore code/noformat blocks and inline code
+    output = _restore_blocks(output, mentions, "J2MMENTION")
     output = _restore_blocks(output, code_blocks, "CODEBLOCK")
     output = _restore_blocks(output, inline_codes, "INLINECODE")
 

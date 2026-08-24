@@ -2,6 +2,7 @@ import re
 
 import pytest
 
+from mcp_atlassian.preprocessing import jira as jira_preprocessing
 from mcp_atlassian.preprocessing.confluence import ConfluencePreprocessor
 from mcp_atlassian.preprocessing.jira import JiraPreprocessor
 from tests.fixtures.confluence_mocks import MOCK_COMMENTS_RESPONSE, MOCK_PAGE_RESPONSE
@@ -2229,6 +2230,29 @@ class TestRoundTripStability:
         assert preprocessor.jira_to_markdown("# one\n# two") == "1. one\n1. two"
         assert preprocessor.jira_to_markdown("* one\n* two") == "- one\n- two"
         assert preprocessor.jira_to_markdown("bq. quoted") == "> quoted"
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [c[1] for c in ROUND_TRIP_CORPUS],
+        ids=[c[0] for c in ROUND_TRIP_CORPUS],
+    )
+    def test_regex_fallback_is_stable_too(self, preprocessor, monkeypatch, markdown):
+        """Descriptions over 20k characters skip the parser entirely.
+
+        Long descriptions are common on Data Center, so the fallback
+        needs the same guarantee - it was doubling entities inside
+        {{monospace}} and adding a blank line to every {code} block.
+        """
+        monkeypatch.setattr(jira_preprocessing, "_WIKI_PARSER_MAX_CHARS", 0)
+        cycles = []
+        current = markdown
+        for _ in range(4):
+            markup = preprocessor.markdown_to_jira(current)
+            cycles.append(markup)
+            current = preprocessor.jira_to_markdown(markup)
+        assert cycles[1] == cycles[2] == cycles[3], (
+            f"fallback markup drifts across cycles: {cycles}"
+        )
 
     def test_escapes_inside_code_are_left_alone(self, preprocessor):
         """A backslash is literal text inside {code} and {{monospace}}."""

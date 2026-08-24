@@ -306,6 +306,14 @@ cd ../../..
 uv run pytest tests/e2e/test_markup_rendering_dc.py --dc-e2e -v
 ```
 
+The wizard also raises Jira's failed-login threshold on the container.
+Jira locks an account behind a CAPTCHA after three failed logins, and
+REST refuses basic auth for a few minutes after setup while the instance
+finishes starting — so every probe in that window counts as a failure and
+the account is locked before it is ever usable, with the CAPTCHA
+clearable only through the web UI. This applies to the disposable test
+instance only; never do it on a real one.
+
 The wizard script obtains Atlassian's **public timebomb license**
 (Jira Software Data Center, 10 users, valid 3 hours — free, no account)
 via `tests/e2e/docker/get-jira-license.sh`, which you can also run on

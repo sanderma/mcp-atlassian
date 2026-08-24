@@ -76,6 +76,34 @@ step "admin account" secure/SetupAdminAccount.jspa \
 step "mail notifications" secure/SetupMailNotifications.jspa \
     --data-urlencode "noemail=true"
 
+# Jira locks an account behind a CAPTCHA after three failed logins, and
+# REST refuses basic auth for a few minutes after the wizard while the
+# instance finishes starting. Every probe in that window counts as a
+# failure, so the account is locked before it is ever usable - and the
+# CAPTCHA can only be cleared through the web UI. Raising the threshold
+# makes the disposable test instance immune; never do this on a real one.
+echo "-> disabling the CAPTCHA lockout (test instance only)"
+JIRA_CONTAINER="${JIRA_CONTAINER:-docker-jira-1}"
+JIRA_HOME_DIR="/var/atlassian/application-data/jira"
+if docker exec "$JIRA_CONTAINER" sh -c \
+    "printf 'jira.maximum.authentication.attempts.allowed = 1000000\\n' \
+        >> $JIRA_HOME_DIR/jira-config.properties" 2>/dev/null; then
+    docker restart "$JIRA_CONTAINER" >/dev/null
+else
+    echo "   (skipped: container '$JIRA_CONTAINER' not reachable)"
+fi
+
+# Wait for REST to answer at all before authenticating: a 503 during
+# startup would otherwise be counted as a failed login.
+echo "Waiting for the REST API ..."
+for _ in $(seq 1 60); do
+    code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' \
+        "$JIRA_URL/rest/api/2/serverInfo" || true)
+    [ "$code" != "503" ] && [ "$code" != "000" ] && break
+    sleep 10
+done
+sleep 30
+
 echo "Verifying ..."
 "${CURL[@]}" -u "$ADMIN_USER:$ADMIN_PASS" "$JIRA_URL/rest/api/2/serverInfo" \
     | head -c 200

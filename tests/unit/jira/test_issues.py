@@ -2206,8 +2206,9 @@ class TestIssuesMixin:
         with pytest.raises(
             Exception,
             match=(
-                "Error retrieving issue TEST-123: "
-                "Issue with project prefix 'TEST' are restricted by configuration"
+                "Error retrieving issue TEST-123: Issue TEST-123 belongs to "
+                "a project excluded by configuration "
+                r"\(JIRA_PROJECTS_FILTER\)"
             ),
         ):
             issues_mixin.get_issue("TEST-123")

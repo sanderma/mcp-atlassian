@@ -118,7 +118,9 @@ def _sample_issues(fetcher: Any, config: Any) -> None:
 
     _print_header(f"Sample of visible issues (up to {_SAMPLE_SIZE})")
     try:
-        result = fetcher.search_issues("", fields=["key", "summary"], limit=_SAMPLE_SIZE)
+        result = fetcher.search_issues(
+            "", fields=["key", "summary"], limit=_SAMPLE_SIZE
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"  ERROR: {exc}")
         return

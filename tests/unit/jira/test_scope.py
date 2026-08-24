@@ -15,6 +15,7 @@ from mcp_atlassian.jira.scope import (
     ScopeEvaluationError,
     and_jql_clause,
     apply_jql_filter,
+    apply_read_scope,
     assert_issues_in_scope,
     classify_issue_keys,
     issues_outside_scope,
@@ -377,3 +378,26 @@ class TestOpaqueIdentifiers:
         keys = [f"FOO-{i % 50}" for i in range(5000)]
         fetcher = FakeFetcher(config, {f"FOO-{i}" for i in range(50)})
         assert issues_outside_scope(fetcher, keys, "read") == []
+
+
+class TestReadScopeHelper:
+    """apply_read_scope applies BOTH boundaries, for raw JQL paths."""
+
+    def test_applies_projects_filter_and_jql_filter(self):
+        config = FakeConfig(projects_filter="FOO", jql_filter="labels = a")
+        result = apply_read_scope("status = Open", config)
+        assert "project = FOO" in result
+        assert "labels = a" in result
+        assert "status = Open" in result
+
+    def test_multiple_projects_become_an_in_clause(self):
+        config = FakeConfig(projects_filter="FOO, BAR")
+        assert "project IN (FOO, BAR)" in apply_read_scope("status = Open", config)
+
+    def test_no_boundary_is_passthrough(self):
+        assert apply_read_scope("status = Open", FakeConfig()) == "status = Open"
+
+    def test_case_insensitive_prefix_check_matches_scope_module(self):
+        """issues.get_issue and the scope checks must agree on casing."""
+        config = FakeConfig(projects_filter="foo")
+        assert keys_outside_projects_filter(["FOO-1"], config) == []

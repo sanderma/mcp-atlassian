@@ -135,6 +135,60 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+def _report_jira_scope(jira_config: JiraConfig) -> None:
+    """Log the active Jira scope boundaries and validate their JQL.
+
+    A boundary that Jira rejects turns every issue-addressed call into a
+    denial, which reads as a permission problem rather than the typo it
+    is. Validating once at startup surfaces it where an operator will see
+    it. Logged at WARNING so an active security boundary — and a broken
+    one — are visible at the default verbosity.
+    """
+    boundaries = [
+        ("JIRA_PROJECTS_FILTER", jira_config.projects_filter),
+        ("JIRA_JQL_FILTER", jira_config.jql_filter),
+        ("JIRA_WRITE_JQL_FILTER", jira_config.write_jql_filter),
+    ]
+    active = [(name, value) for name, value in boundaries if value]
+    if not active:
+        logger.info(
+            "Jira scope: no boundary configured (the agent may read and "
+            "write anything these credentials can)."
+        )
+        return
+
+    for name, value in active:
+        logger.warning("Jira scope active: %s=%s", name, value)
+
+    jql_boundaries = [
+        (name, value)
+        for name, value in active
+        if name in ("JIRA_JQL_FILTER", "JIRA_WRITE_JQL_FILTER")
+    ]
+    if not jql_boundaries:
+        return
+
+    try:
+        from mcp_atlassian.jira import JiraFetcher
+
+        fetcher = JiraFetcher(config=jira_config)
+        for name, value in jql_boundaries:
+            try:
+                fetcher.search_issues(value, fields=["key"], limit=1)
+                logger.info("Jira scope: %s validated against Jira.", name)
+            except Exception as exc:  # noqa: BLE001 - reported, not fatal
+                logger.error(
+                    "Jira scope: %s is INVALID for this Jira instance (%s). "
+                    "Every issue-addressed tool call will be refused until "
+                    "it is corrected. Verify with: "
+                    "mcp-atlassian --jira-scope-check",
+                    name,
+                    exc,
+                )
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        logger.debug("Jira scope: could not validate boundaries now (%s)", exc)
+
+
 @asynccontextmanager
 async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict[str, Any]]:
     logger.info("Main Atlassian MCP server lifespan starting...")
@@ -186,6 +240,9 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict[str,
     logger.info(f"Read-only mode: {'ENABLED' if read_only else 'DISABLED'}")
     logger.info(f"Enabled tools filter: {enabled_tools or 'All tools enabled'}")
     logger.info(f"Enabled toolsets filter: {sorted(enabled_toolsets)}")
+
+    if loaded_jira_config is not None:
+        _report_jira_scope(loaded_jira_config)
 
     try:
         yield {"app_lifespan_context": app_context}

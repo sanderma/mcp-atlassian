@@ -26,6 +26,14 @@ ISSUE_KEY_PARAMS = {
     "link_id",
 }
 
+# Parameters that read like an issue identifier but are not one, so the
+# heuristic below does not flag them.
+NOT_ISSUE_IDENTIFIERS = {
+    "issue_type",
+    "issue_type_id",
+    "issue_type_name",
+}
+
 # Tools that take an issue-key parameter but cannot be scope-checked on it,
 # each with the reason. Keep this list short and justified.
 EXEMPT: dict[str, str] = {
@@ -103,6 +111,61 @@ async def test_write_tools_require_write_scope():
 
     assert not wrong, "Write tools not enforcing the write scope: " + ", ".join(
         sorted(wrong)
+    )
+
+
+@pytest.mark.anyio
+async def test_decorator_params_exist_in_signature():
+    """A decorator naming a parameter the tool does not have is inert.
+
+    ``@enforce_issue_scope("issue_key")`` on a tool whose parameter is
+    ``issue_keys`` collects nothing, enforces nothing, and would still
+    look decorated — so the names are checked against the signature.
+    """
+    tools = await _jira_tools()
+    broken = []
+    for tool in tools:
+        marker = _scope_marker(tool.fn)
+        if marker is None:
+            continue
+        params = _unwrap_params(tool.fn)
+        missing = [p for p in marker.get("params", ()) if p not in params]
+        if missing:
+            short_name = getattr(tool.fn, "__name__", tool.name)
+            broken.append(f"{short_name}: {missing} not in {sorted(params)}")
+
+    assert not broken, "Scope decorators naming unknown parameters:\n  " + "\n  ".join(
+        broken
+    )
+
+
+@pytest.mark.anyio
+async def test_key_param_names_are_current():
+    """Catch a tool that names its issue key something new.
+
+    ISSUE_KEY_PARAMS is a hand-maintained list, so a tool introducing
+    e.g. ``parent_key`` would silently escape the coverage check. Flag
+    any parameter that looks issue-key-shaped but is not in the list.
+    """
+    tools = await _jira_tools()
+    suspicious = []
+    for tool in tools:
+        for param in _unwrap_params(tool.fn):
+            if param in ISSUE_KEY_PARAMS or param in NOT_ISSUE_IDENTIFIERS:
+                continue
+            lowered = param.lower()
+            looks_like_key = (
+                ("issue" in lowered and ("key" in lowered or "id" in lowered))
+                or lowered.endswith("_issue")
+                or lowered in {"key", "keys"}
+            )
+            if looks_like_key:
+                short_name = getattr(tool.fn, "__name__", tool.name)
+                suspicious.append(f"{short_name}.{param}")
+
+    assert not suspicious, (
+        "Parameters that look like issue keys but are not covered by "
+        "ISSUE_KEY_PARAMS:\n  " + "\n  ".join(sorted(set(suspicious)))
     )
 
 

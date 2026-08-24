@@ -175,9 +175,58 @@ uvx mcp-atlassian \
 
 ## Handing a narrower scope to a subagent
 
+There are two ways to do this, and they give very different guarantees.
+
+### Enforced: proxy the subagent through this server (recommended)
+
+When this server runs over HTTP, a subagent can connect to **the same server**
+and send narrowing headers. They are intersected with the configured
+boundaries — never substituted for them — so the subagent's access is
+mathematically a subset of the server's, whatever it sends:
+
+| Header | Effect |
+|---|---|
+| `X-Atlassian-Jira-Scope-Jql` | ANDed into the read boundary |
+| `X-Atlassian-Jira-Write-Scope-Jql` | ANDed into the write boundary |
+
+```json
+{
+  "mcpServers": {
+    "jira-subagent": {
+      "url": "http://127.0.0.1:9000/mcp",
+      "headers": {
+        "X-Atlassian-Jira-Scope-Jql": "project = PROJ",
+        "X-Atlassian-Jira-Write-Scope-Jql": "assignee = currentUser()"
+      }
+    }
+  }
+}
+```
+
+Two properties make this the option to prefer:
+
+- **A subagent cannot widen its scope.** Dropping the headers gets it the
+  server's boundary, never more. A malformed clause is rejected rather than
+  applied, so it cannot be used to break out either.
+- **The subagent never holds Jira credentials.** Only the parent server has
+  them, so the subagent has no way to bypass the MCP server and call Jira
+  directly.
+
+### Unenforced: give the subagent its own server
+
 The boundaries are environment variables of a server **process**. A second MCP
 server started for a subagent gets its own environment and inherits nothing, so
-whatever that configuration sets is the entire boundary for that subagent.
+whatever that configuration sets is the entire boundary for that subagent —
+including a *wider* one.
+
+<Warning>
+This form is a convention, not a guarantee. The subagent's server holds Jira
+credentials directly, so its real ceiling is the Jira permissions of that
+account: anything written into its environment — or anything that can edit that
+environment — can grant more access than the parent had. Use the proxy form
+above when the boundary has to hold, or give the subagent an account with fewer
+Jira permissions.
+</Warning>
 
 To give a subagent less access than you have, AND your own boundary into theirs
 rather than replacing it:
@@ -228,6 +277,14 @@ Rules of thumb when composing a narrower configuration:
 | `READ_ONLY_MODE` | `--read-only` | `true` disables all write tools |
 | — | `--jira-scope-check` | Preflight the configuration and exit |
 | — | `--jira-scope-check-issues KEYS` | Classify the given issue keys during the preflight |
+
+Per-request narrowing (HTTP transport), intersected with the configured
+boundaries and never able to widen them:
+
+| Header | Effect |
+|---|---|
+| `X-Atlassian-Jira-Scope-Jql` | Extra read constraint for this caller |
+| `X-Atlassian-Jira-Write-Scope-Jql` | Extra write constraint for this caller |
 
 See [Configuration](/docs/configuration) for the full environment variable
 reference and [JQL Guide](/docs/guides/jql-guide) for query syntax.

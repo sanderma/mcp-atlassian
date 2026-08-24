@@ -25,6 +25,7 @@ from .protocols import (
     ProjectsOperationsProto,
     UsersOperationsProto,
 )
+from .scope import keys_outside_projects_filter
 
 logger = logging.getLogger("mcp-jira")
 
@@ -106,25 +107,15 @@ class IssuesMixin(
             Exception: If there is an error retrieving the issue
         """
         try:
-            # Obtain the projects filter from the config.
-            # These should NOT be overridden by the request.
-            filter_to_use = self.config.projects_filter
-
-            # Apply projects filter if present
-            if filter_to_use:
-                # Split projects filter by commas and handle possible whitespace
-                projects = [p.strip() for p in filter_to_use.split(",")]
-
-                # Obtain the project key from issue_key
-                issue_key_project = issue_key.split("-")[0]
-
-                if issue_key_project not in projects:
-                    # If the project key not in the filter, return an empty issue
-                    msg = (
-                        "Issue with project prefix "
-                        f"'{issue_key_project}' are restricted by configuration"
-                    )
-                    raise ValueError(msg)
+            # Project allowlist (JIRA_PROJECTS_FILTER). Shared with the
+            # scope checks so a key is judged the same way everywhere —
+            # notably case-insensitively.
+            if keys_outside_projects_filter([issue_key], self.config):
+                msg = (
+                    f"Issue {issue_key} belongs to a project excluded by "
+                    "configuration (JIRA_PROJECTS_FILTER)"
+                )
+                raise ValueError(msg)
 
             # Determine fields_param: use provided fields or default from constant
             fields_param = fields

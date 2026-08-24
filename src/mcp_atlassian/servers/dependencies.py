@@ -507,6 +507,9 @@ def _create_and_validate(
     """
     fn_name = f"get_{spec.name.lower()}_fetcher"
     auth_desc = "header-based" if auth_branch == "header_pat" else "user"
+    # Every per-request auth branch funnels through here, so this is the one
+    # place a caller's narrowing headers need applying.
+    config = _narrowed_for_request(config)
     try:
         request_passthrough_headers = _get_request_passthrough_headers(
             request, spec, config
@@ -839,6 +842,58 @@ def _carry_over_scope_boundaries(config: Any) -> None:
     )
 
 
+#: Request headers that NARROW the Jira scope for a single caller. They are
+#: intersected with the server's configured boundaries, never substituted for
+#: them, so a caller — including a subagent proxying through this server —
+#: can restrict itself further but can never widen beyond what the operator
+#: configured. See docs/advanced/jira-scope.mdx.
+JIRA_SCOPE_NARROW_HEADER = "X-Atlassian-Jira-Scope-Jql"
+JIRA_WRITE_SCOPE_NARROW_HEADER = "X-Atlassian-Jira-Write-Scope-Jql"
+
+
+def _narrowed_for_request(config: Any) -> Any:
+    """Return ``config`` with the request's narrowing headers intersected.
+
+    Narrowing only: the result is the intersection of what the operator
+    configured and what the caller asked for, so delegating a narrower
+    scope is possible while escalating is not.
+
+    Never mutates the input — the global lifespan config is shared across
+    requests, and one caller's narrowing must not leak into another's.
+    """
+    if not isinstance(config, JiraConfig):
+        return config
+    try:
+        request = get_http_request()
+    except Exception:  # noqa: BLE001 - stdio transport has no request
+        return config
+    if request is None:
+        return config
+
+    from mcp_atlassian.jira.scope import narrow_boundary
+
+    updates: dict[str, str | None] = {}
+    for header, attribute in (
+        (JIRA_SCOPE_NARROW_HEADER, "jql_filter"),
+        (JIRA_WRITE_SCOPE_NARROW_HEADER, "write_jql_filter"),
+    ):
+        value = request.headers.get(header)
+        if not value or not value.strip():
+            continue
+        try:
+            narrowed = narrow_boundary(getattr(config, attribute, None), value)
+        except ValueError as exc:
+            # Fail closed: a caller cannot get a wider scope by sending a
+            # malformed narrowing clause.
+            raise ValueError(f"Invalid {header}: {exc}") from exc
+        updates[attribute] = narrowed
+        logger.info("Applied %s narrowing: %s=%s", header, attribute, narrowed)
+
+    if not updates:
+        return config
+    return dataclasses.replace(config, **updates)
+
+
 async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
     """Generic fetcher resolution for both Jira and Confluence.
 
@@ -1064,6 +1119,7 @@ async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
             global_config_fallback = _with_request_passthrough_headers(
                 request, spec, global_config_fallback
             )
+            global_config_fallback = _narrowed_for_request(global_config_fallback)
         return spec.fetcher_class(config=global_config_fallback)
 
     logger.error(f"{spec.name} configuration could not be resolved.")

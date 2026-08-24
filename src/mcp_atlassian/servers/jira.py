@@ -366,15 +366,33 @@ async def get_scope(
             "it cannot constrain issue creation.",
         ],
         "delegating_to_a_subagent": {
-            "how": (
-                "Start another instance of this server with these "
-                "environment variables to give a subagent a narrower scope. "
-                "A subagent's server is a separate process with its own "
-                "environment and inherits NOTHING from this one: a wider "
-                "value really is wider. To restrict rather than widen, AND "
-                "your own boundaries (above) into the child's values."
+            "preferred": (
+                "If this server is reachable over HTTP, point the subagent "
+                "at THIS server and add the narrowing headers below. They "
+                "are intersected with the boundaries above, so the subagent "
+                "can only ever get a subset of your access — it cannot "
+                "widen its scope even if it tries, and it never holds Jira "
+                "credentials of its own."
             ),
-            "example": {
+            "narrowing_headers": {
+                "X-Atlassian-Jira-Scope-Jql": (
+                    "extra read constraint, e.g. 'project = PROJ'"
+                ),
+                "X-Atlassian-Jira-Write-Scope-Jql": (
+                    "extra write constraint, e.g. 'assignee = currentUser()'"
+                ),
+            },
+            "alternative_separate_process": (
+                "If the subagent must run its own server, note that it is a "
+                "separate process with its own environment and inherits "
+                "NOTHING from this one: whatever you put in its environment "
+                "is its real scope, and a wider value really is wider. AND "
+                "your own boundaries (above) into the child's values. It "
+                "will also hold Jira credentials directly, so its true "
+                "ceiling is the Jira permissions of that account, not this "
+                "configuration."
+            ),
+            "example_environment": {
                 "JIRA_JQL_FILTER": "project = PROJ AND labels = automation",
                 "JIRA_WRITE_JQL_FILTER": "project = PROJ AND assignee = currentUser()",
                 "READ_ONLY_MODE": "true (for a review-only subagent)",

@@ -192,6 +192,68 @@ def apply_jql_filter(jql: str, config: Any) -> str:
     return constrained
 
 
+def narrow_boundary(existing: str | None, addition: str | None) -> str | None:
+    """Combine a boundary with an additional clause, narrowing only.
+
+    Used for delegation: a caller may add constraints to the boundary a
+    server already enforces, but the result is always the intersection,
+    so no caller can widen what the operator configured.
+
+    ``addition`` is validated the same way a caller's query is: an
+    unbalanced clause could otherwise close the wrapping parentheses and
+    ``OR`` its way out of the boundary.
+
+    Args:
+        existing: The configured boundary, if any.
+        addition: The extra clause to intersect with it, if any.
+
+    Returns:
+        The narrowed boundary, or None when neither is set.
+
+    Raises:
+        ValueError: If ``addition`` is not a balanced JQL expression.
+    """
+    extra = addition.strip() if isinstance(addition, str) else None
+    if not extra:
+        return existing
+    balanced, depth = _scan_jql(extra)
+    if not balanced or depth != 0:
+        raise ValueError(
+            "Malformed scope narrowing clause: unbalanced "
+            f"{'quotes' if not balanced else 'parentheses'}. It was "
+            "rejected rather than applied."
+        )
+    extra = _split_order_by(extra)[0].strip()
+    if not extra:
+        return existing
+    if not existing:
+        return extra
+    return f"({existing}) AND ({extra})"
+
+
+def projects_clause(config: Any) -> str | None:
+    """The JIRA_PROJECTS_FILTER allowlist as a JQL clause, or None."""
+    projects = allowed_project_keys(config)
+    if not projects:
+        return None
+    quoted = [quote_jql_identifier_if_needed(p) for p in projects]
+    if len(quoted) == 1:
+        return f"project = {quoted[0]}"
+    return f"project IN ({', '.join(quoted)})"
+
+
+def apply_read_scope(jql: str, config: Any) -> str:
+    """Constrain ``jql`` to every configured read boundary.
+
+    Applies the project allowlist and the read JQL filter. Used by paths
+    that issue JQL directly instead of going through ``search_issues``.
+    """
+    clause = projects_clause(config)
+    if clause:
+        jql = and_jql_clause(jql, clause)
+    return apply_jql_filter(jql, config)
+
+
 def allowed_project_keys(config: Any) -> list[str] | None:
     """Project keys from JIRA_PROJECTS_FILTER, upper-cased, or None."""
     projects_filter = _str_option(config, "projects_filter")

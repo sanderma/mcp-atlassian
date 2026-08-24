@@ -78,6 +78,12 @@ unrestricted, writes do not.
 - **Per user.** In multi-user HTTP transports the boundaries come from the
   server's environment and apply to every caller, whatever credentials they
   present.
+- **Visible to the agent.** A write refusal quotes `JIRA_WRITE_JQL_FILTER`, and
+  `jira_get_scope` reports every boundary, so the agent can explain the limit
+  and stay inside it. Write the filters as you would a JQL query someone will
+  read — if one would carry something you would rather an agent (and its
+  transcript) not see, express the same restriction with a label or component
+  instead.
 - **Cost.** With a boundary configured, a tool call carrying issue keys runs one
   extra JQL search to validate them (batched, 20 keys per query). With no
   boundary configured the check is skipped entirely — no client is even

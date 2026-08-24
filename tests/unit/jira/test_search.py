@@ -1356,3 +1356,73 @@ class TestSearchFilterAndInjectionRegression:
             "config allowlist must still be applied even when a projects_filter arg "
             f"is supplied; JQL was {sent_jql!r}"
         )
+
+
+class TestSearchReadPathParity:
+    """Search must return the same Markdown ``jira_get_issue`` does.
+
+    Only ``get_issue`` used to translate wiki markup, so an agent that
+    found an issue through ``jira_search`` got raw markup - and writing
+    it back ran its own markup through the Markdown converter a second
+    time, mangling the description.
+    """
+
+    @pytest.fixture
+    def fetcher(self, jira_fetcher: JiraFetcher) -> JiraFetcher:
+        jira_fetcher.config = MagicMock()
+        jira_fetcher.config.is_cloud = False
+        jira_fetcher.config.projects_filter = None
+        jira_fetcher.config.jql_filter = None
+        jira_fetcher.config.url = "https://jira.example.com"
+        return jira_fetcher
+
+    def _response(self, description: str) -> dict:
+        return {
+            "issues": [
+                {
+                    "id": "1",
+                    "key": "TEST-1",
+                    "fields": {
+                        "summary": "s",
+                        "issuetype": {"name": "Task"},
+                        "status": {"name": "Open"},
+                        "description": description,
+                    },
+                }
+            ],
+            "total": 1,
+            "startAt": 0,
+            "maxResults": 50,
+        }
+
+    def test_search_translates_wiki_markup(self, fetcher: JiraFetcher):
+        fetcher.jira.jql = MagicMock(
+            return_value=self._response("h2. Head\n\nSee {{cfg}} and *bold*")
+        )
+        result = fetcher.search_issues("project = TEST", fields=["description"])
+        assert result.issues[0].description == "## Head\n\nSee `cfg` and **bold**"
+
+    def test_search_translates_comment_bodies(self, fetcher: JiraFetcher):
+        response = self._response("body")
+        response["issues"][0]["fields"]["comment"] = {
+            "comments": [{"id": "1", "body": "a {{mono}} comment"}]
+        }
+        fetcher.jira.jql = MagicMock(return_value=response)
+        result = fetcher.search_issues("project = TEST", fields=["*all"])
+        assert "`mono`" in result.issues[0].comments[0].body
+
+    def test_search_leaves_adf_descriptions_to_the_model(self, fetcher: JiraFetcher):
+        """Cloud sends a dict; translating it is the model layer's job."""
+        adf = {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": "hello"}],
+                }
+            ],
+        }
+        fetcher.jira.jql = MagicMock(return_value=self._response(adf))
+        result = fetcher.search_issues("project = TEST", fields=["description"])
+        assert result.issues[0].description == "hello"

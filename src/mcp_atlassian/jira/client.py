@@ -307,6 +307,65 @@ class JiraClient:
         _ = self.config.url if hasattr(self, "config") else ""
         return self.preprocessor.clean_jira_text(text)
 
+    def _rich_text_custom_fields(self, fields: dict[str, Any]) -> list[str]:
+        """Custom field IDs in ``fields`` that hold wiki markup, not text.
+
+        The write path converts Markdown for ``:textarea`` custom fields,
+        so reads have to convert back. Returns nothing unless the payload
+        actually carries a custom field, so plain reads cost no lookup.
+        """
+        candidates = [
+            field_id
+            for field_id, value in fields.items()
+            if field_id.startswith("customfield_") and isinstance(value, str) and value
+        ]
+        if not candidates:
+            return []
+        get_fields = getattr(self, "get_fields", None)
+        if get_fields is None:
+            return []
+        try:
+            definitions = get_fields()
+        except Exception as exc:  # noqa: BLE001 - a read must not fail on this
+            logger.debug(f"Could not identify rich-text custom fields: {exc}")
+            return []
+        rich_text = {
+            definition.get("id")
+            for definition in definitions
+            if str((definition.get("schema") or {}).get("custom", "")).endswith(
+                ":textarea"
+            )
+        }
+        return [field_id for field_id in candidates if field_id in rich_text]
+
+    def _clean_issue_text_fields(self, issue: dict[str, Any]) -> None:
+        """Translate an issue payload's rich text to Markdown, in place.
+
+        Search and board results are handed to the model layer raw, so
+        without this an agent gets Markdown from ``jira_get_issue`` and
+        wiki markup from ``jira_search`` for the same field - and writing
+        the latter back would run it through the converter a second time.
+
+        ADF (dict) values are left to the model layer.
+        """
+        fields = issue.get("fields")
+        if not isinstance(fields, dict):
+            return
+
+        description = fields.get("description")
+        if isinstance(description, str) and description:
+            fields["description"] = self._clean_text(description)
+
+        comment = fields.get("comment")
+        if isinstance(comment, dict):
+            for entry in comment.get("comments") or []:
+                body = entry.get("body") if isinstance(entry, dict) else None
+                if isinstance(body, str) and body:
+                    entry["body"] = self._clean_text(body)
+
+        for field_id in self._rich_text_custom_fields(fields):
+            fields[field_id] = self._clean_text(fields[field_id])
+
     def _markdown_to_jira(self, markdown_text: str) -> str | dict[str, Any]:
         """Convert Markdown to Jira format (ADF for Cloud, wiki markup for Server).
 

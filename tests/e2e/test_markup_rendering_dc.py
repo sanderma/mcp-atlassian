@@ -22,12 +22,15 @@ no leaked sentinels, no stray backslash escapes).
 
 from __future__ import annotations
 
+import os
 import re
 
 import pytest
 import requests
 from bs4 import BeautifulSoup
 
+from mcp_atlassian.jira import JiraFetcher
+from mcp_atlassian.jira.config import JiraConfig
 from mcp_atlassian.preprocessing.jira import JiraPreprocessor
 from tests.e2e.conftest import DCInstanceInfo, _check_dc_health
 
@@ -798,3 +801,86 @@ def test_round_trip_renders_identically(
     assert visible(first) == visible(second), (
         f"rendering shifts after one edit cycle\n1={first!r}\n2={second!r}"
     )
+
+
+@pytest.fixture(scope="module")
+def dc_fetcher() -> JiraFetcher:
+    """A fetcher against the live DC, for the API-level round trip."""
+    info = DCInstanceInfo()
+    if not _check_dc_health(info.jira_url):
+        pytest.skip(f"Jira DC not reachable at {info.jira_url}")
+    os.environ.setdefault("JIRA_URL", info.jira_url)
+    return JiraFetcher(
+        config=JiraConfig(
+            url=info.jira_url,
+            auth_type="basic",
+            username=info.admin_username,
+            api_token=info.admin_password,
+            ssl_verify=False,
+        )
+    )
+
+
+AGENT_MARKDOWN = (
+    "## Head\n\n"
+    "See `cfg` and **bold** and [~admin] and 2*3*4\n\n"
+    "1. run `--dry-run`\n2. check the output\n\n"
+    "| key | value |\n|---|---|\n| `a|b` | [doc](https://x.test/p) |"
+)
+
+
+def test_every_read_path_returns_markdown(dc_fetcher: JiraFetcher) -> None:
+    """get_issue, search and the post-write reads must agree.
+
+    They used to disagree: only ``get_issue`` translated the description,
+    so an agent that found an issue through ``jira_search`` got wiki
+    markup and fed its own markup back through the converter on the next
+    write.
+    """
+    created = dc_fetcher.create_issue(
+        project_key="E2E",
+        summary="read path parity",
+        issue_type="Task",
+        description=AGENT_MARKDOWN,
+    )
+    key = created.key
+    try:
+        from_get = dc_fetcher.get_issue(key, fields="description").description
+        found = dc_fetcher.search_issues(
+            f"key = {key}", fields=["description"], limit=1
+        )
+        from_search = found.issues[0].description
+
+        assert created.description == from_get
+        assert from_search == from_get
+        assert "h2." not in from_get and "{{" not in from_get
+        assert from_get.startswith("## Head")
+    finally:
+        dc_fetcher.jira.delete_issue(key)
+
+
+def test_search_edit_write_leaves_the_issue_unchanged(dc_fetcher: JiraFetcher) -> None:
+    """The full agent journey: find it, edit a line, write it back."""
+    created = dc_fetcher.create_issue(
+        project_key="E2E",
+        summary="round trip through the API",
+        issue_type="Task",
+        description=AGENT_MARKDOWN,
+    )
+    key = created.key
+    try:
+        found = dc_fetcher.search_issues(
+            f"key = {key}", fields=["description"], limit=1
+        )
+        description = found.issues[0].description
+        edited = description.replace("check the output", "check the log")
+
+        dc_fetcher.update_issue(key, fields={"description": edited})
+        after_first = dc_fetcher.get_issue(key, fields="description").description
+        assert after_first == edited
+
+        # A second cycle changes nothing at all - not even the stored markup.
+        dc_fetcher.update_issue(key, fields={"description": after_first})
+        assert dc_fetcher.get_issue(key, fields="description").description == edited
+    finally:
+        dc_fetcher.jira.delete_issue(key)

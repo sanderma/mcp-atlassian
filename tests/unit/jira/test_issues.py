@@ -3084,3 +3084,60 @@ class TestMoveIssue:
 
         assert result.key == "DST-99"
         assert cloud_mixin.jira.get_issue.call_args_list[1].args == ("SRC-1",)
+
+
+class TestRichTextCustomFieldReads:
+    """``:textarea`` custom fields are written as wiki markup, so they
+    have to be read back as Markdown - the write path already converts
+    them, and without the matching read an agent's edit would convert
+    its own output a second time."""
+
+    @pytest.fixture
+    def fetcher(self, jira_fetcher: JiraFetcher) -> JiraFetcher:
+        return jira_fetcher
+
+    def _fields(self):
+        return [
+            {
+                "id": "customfield_100",
+                "name": "Design notes",
+                "schema": {
+                    "type": "string",
+                    "custom": "com.atlassian.jira.plugin.system.customfieldtypes:textarea",
+                },
+            },
+            {
+                "id": "customfield_200",
+                "name": "Short label",
+                "schema": {
+                    "type": "string",
+                    "custom": "com.atlassian.jira.plugin.system.customfieldtypes:textfield",
+                },
+            },
+        ]
+
+    def test_textarea_field_is_translated(self, fetcher: JiraFetcher):
+        fetcher.get_fields = MagicMock(return_value=self._fields())
+        issue = {"fields": {"customfield_100": "h2. Head\n\n{{mono}}"}}
+        fetcher._clean_issue_text_fields(issue)
+        assert issue["fields"]["customfield_100"] == "## Head\n\n`mono`"
+
+    def test_single_line_field_is_left_alone(self, fetcher: JiraFetcher):
+        fetcher.get_fields = MagicMock(return_value=self._fields())
+        issue = {"fields": {"customfield_200": "h2. not a heading"}}
+        fetcher._clean_issue_text_fields(issue)
+        assert issue["fields"]["customfield_200"] == "h2. not a heading"
+
+    def test_no_custom_fields_means_no_lookup(self, fetcher: JiraFetcher):
+        """A plain read must not pay for a /field call."""
+        fetcher.get_fields = MagicMock(side_effect=AssertionError("looked up"))
+        issue = {"fields": {"description": "h2. Head"}}
+        fetcher._clean_issue_text_fields(issue)
+        assert issue["fields"]["description"] == "## Head"
+
+    def test_a_failing_lookup_does_not_break_the_read(self, fetcher: JiraFetcher):
+        fetcher.get_fields = MagicMock(side_effect=RuntimeError("no permission"))
+        issue = {"fields": {"customfield_100": "h2. Head", "description": "*b*"}}
+        fetcher._clean_issue_text_fields(issue)
+        assert issue["fields"]["customfield_100"] == "h2. Head"
+        assert issue["fields"]["description"] == "**b**"

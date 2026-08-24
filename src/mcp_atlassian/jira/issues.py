@@ -235,6 +235,11 @@ class IssuesMixin(
                             if isinstance(raw_body, str) and raw_body:
                                 comment["body"] = self._clean_text(raw_body)
 
+            # Rich-text custom fields are written as wiki markup like the
+            # description is, so they have to be read back the same way.
+            for field_id in self._rich_text_custom_fields(fields_data):
+                fields_data[field_id] = self._clean_text(fields_data[field_id])
+
             # Extract epic information
             try:
                 epic_info = self._extract_epic_information(issue)
@@ -761,6 +766,7 @@ class IssuesMixin(
                 msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
                 logger.error(msg)
                 raise TypeError(msg)
+            self._clean_issue_text_fields(issue_data)
             return JiraIssue.from_api_response(issue_data)
 
         except Exception as e:
@@ -1306,6 +1312,7 @@ class IssuesMixin(
                 )
                 logger.error(msg)
                 raise TypeError(msg)
+            self._clean_issue_text_fields(issue_data)
             issue = JiraIssue.from_api_response(
                 issue_data, requested_fields=return_fields_param
             )
@@ -1424,6 +1431,7 @@ class IssuesMixin(
                 msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
                 logger.error(msg)
                 raise TypeError(msg)
+            self._clean_issue_text_fields(issue_data)
             return JiraIssue.from_api_response(
                 issue_data, requested_fields=return_fields_param
             )
@@ -1525,6 +1533,7 @@ class IssuesMixin(
             msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
             logger.error(msg)
             raise TypeError(msg)
+        self._clean_issue_text_fields(issue_data)
         return JiraIssue.from_api_response(
             issue_data, requested_fields=return_fields_param
         )
@@ -1677,6 +1686,7 @@ class IssuesMixin(
                 msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
                 logger.error(msg)
                 raise TypeError(msg)
+            self._clean_issue_text_fields(issue_data)
             return JiraIssue.from_api_response(issue_data)
 
         except (ValueError, NotImplementedError, TypeError):
@@ -1966,6 +1976,7 @@ class IssuesMixin(
                             logger.error(msg)
                             raise TypeError(msg)
 
+                        self._clean_issue_text_fields(issue_data)
                         created_issues.append(
                             JiraIssue.from_api_response(
                                 issue_data,

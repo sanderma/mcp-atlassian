@@ -108,6 +108,21 @@ conversion never destroys content.
 - **Multi-paragraph list items**: continuation paragraphs lose their
   list attachment (a Jira list limitation).
 
+## Where conversion applies
+
+Every rich-text field is converted in both directions, so an agent sees
+Markdown no matter which tool it used to get there:
+
+| Field | Write | Read |
+|---|---|---|
+| `description` | `jira_create_issue`, `jira_update_issue`, `jira_batch_create_issues` | `jira_get_issue`, `jira_search`, board/sprint issue lists, and the issue returned by every write tool |
+| Comment bodies | `jira_add_comment`, `jira_update_comment`, transition comments | `jira_get_issue`, `jira_get_comments`, `jira_search` |
+| Worklog comments | `jira_add_worklog` | `jira_get_worklog` |
+| Rich-text custom fields (`:textarea`) | `jira_update_issue`, `jira_create_issue` | `jira_get_issue`, `jira_search` |
+
+Single-line custom fields (`:textfield`) hold plain text and are left
+alone in both directions.
+
 ## Read path: wiki markup → Markdown
 
 `jira_to_markdown` uses [jira2markdown](https://github.com/catcombo/jira2markdown)

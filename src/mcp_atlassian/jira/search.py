@@ -68,6 +68,13 @@ class SearchMixin(JiraClient, IssueOperationsProto):
         return jql
 
     @handle_auth_errors("Jira API")
+    def _clean_result_text(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Translate the rich text of every issue in a search response."""
+        for issue in response.get("issues") or []:
+            if isinstance(issue, dict):
+                self._clean_issue_text_fields(issue)
+        return response
+
     def search_issues(
         self,
         jql: str,
@@ -186,7 +193,7 @@ class SearchMixin(JiraClient, IssueOperationsProto):
                     response_dict["names"] = field_names
 
                 search_result = JiraSearchResult.from_api_response(
-                    response_dict,
+                    self._clean_result_text(response_dict),
                     base_url=self.config.url,
                     requested_fields=fields_param,
                 )
@@ -204,7 +211,9 @@ class SearchMixin(JiraClient, IssueOperationsProto):
 
                 # Convert the response to a search result model
                 search_result = JiraSearchResult.from_api_response(
-                    response, base_url=self.config.url, requested_fields=fields_param
+                    self._clean_result_text(response),
+                    base_url=self.config.url,
+                    requested_fields=fields_param,
                 )
 
                 # Return the full search result object
@@ -271,7 +280,9 @@ class SearchMixin(JiraClient, IssueOperationsProto):
 
             # Convert the response to a search result model
             search_result = JiraSearchResult.from_api_response(
-                response, base_url=self.config.url, requested_fields=fields_param
+                self._clean_result_text(response),
+                base_url=self.config.url,
+                requested_fields=fields_param,
             )
             return search_result
         except requests.HTTPError as e:

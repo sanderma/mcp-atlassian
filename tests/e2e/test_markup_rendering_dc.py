@@ -884,3 +884,39 @@ def test_search_edit_write_leaves_the_issue_unchanged(dc_fetcher: JiraFetcher) -
         assert dc_fetcher.get_issue(key, fields="description").description == edited
     finally:
         dc_fetcher.jira.delete_issue(key)
+
+
+# YAML's own nested-mapping shape: the case Jira's highlighter breaks on.
+_NESTED_MAPPING = "resources:\n  limits:\n    memory: 2Gi\n  requests:\n    cpu: 500m"
+
+
+@pytest.mark.parametrize(
+    "language", sorted(JiraPreprocessor.VALID_JIRA_LANGUAGES | {"yaml", "yml"})
+)
+def test_code_block_languages_keep_their_line_breaks(
+    jira_render_session: tuple[requests.Session, str],
+    preprocessor: JiraPreprocessor,
+    language: str,
+) -> None:
+    """A highlighter that eats newlines destroys the block.
+
+    Jira's YAML highlighter swallows the newline after a line ending in
+    a bare "key:", collapsing a nested mapping onto one line - and
+    indentation *is* YAML's syntax. The converter drops those languages
+    to plain {code}; this sweep is what keeps that list honest as Jira
+    versions change.
+    """
+    markdown = f"```{language}\n{_NESTED_MAPPING}\n```"
+    markup, html_out = render_markdown(jira_render_session, preprocessor, markdown)
+
+    if language in JiraPreprocessor.BROKEN_JIRA_HIGHLIGHTERS:
+        assert ":" not in markup.split("\n", 1)[0], (
+            f"{language} still asks Jira to highlight: {markup!r}"
+        )
+
+    block = re.search(r"<pre[^>]*>([\s\S]*?)</pre>", html_out)
+    assert block is not None, f"no code block rendered\nmarkup={markup!r}"
+    rendered = re.sub(r"<[^>]+>", "", block.group(1))
+    assert rendered.count("\n") >= _NESTED_MAPPING.count("\n") + 1, (
+        f"{language} lost line breaks: {rendered!r}"
+    )

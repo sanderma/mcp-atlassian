@@ -68,7 +68,7 @@ conversion never destroys content.
 | `# H1` … `###### H6`, setext | `h1.` … `h6.` |
 | `**bold**` / `*italic*` / `~~strike~~` | `*bold*` / `_italic_` / `-strike-` |
 | `` `inline code` `` | `{{...}}` with full entity encoding (see below) |
-| ` ```lang ` fenced / indented code | `{code:lang}` — language normalized to Jira's supported set (`typescript`→`javascript`, `dockerfile`→`bash`, unknown → plain `{code}`); content containing `{code` uses `{noformat}` instead |
+| ` ```lang ` fenced / indented code | `{code:lang}` — language normalized to Jira's supported set (`typescript`→`javascript`, `dockerfile`→`bash`, unknown → plain `{code}`); `yaml`/`yml` also fall back to plain `{code}` (see below); content containing `{code` uses `{noformat}` instead |
 | Lists (`-`/`*`/`+`, `1.`/`1)`, nested, mixed) | `*` / `#` runs (`**`, `##`, `#*`, …) |
 | `> quote` (single line / multi-line) | `bq.` / `{quote}…{quote}` |
 | `[text](url)`, reference links, autolinks, titles | `[text\|url]` or `[text\|url\|title]` |
@@ -105,6 +105,12 @@ conversion never destroys content.
   not italic "3".
 - **Code containing both `{code}` and `{noformat}`**: kept as `{code}`;
   Jira offers no escaping inside either block.
+- **YAML highlighting**: Jira's YAML highlighter swallows the newline
+  after a line ending in a bare `key:`, collapsing a nested mapping onto
+  one line — and indentation *is* YAML's syntax. `yaml`/`yml` blocks are
+  emitted as plain `{code}`, trading colour for a readable block. Every
+  other supported language is swept for the same fault in
+  `test_code_block_languages_keep_their_line_breaks`.
 - **Multi-paragraph list items**: continuation paragraphs lose their
   list attachment (a Jira list limitation).
 

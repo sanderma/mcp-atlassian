@@ -982,6 +982,16 @@ class JiraPreprocessor(BasePreprocessor):
         "none",  # plain text, no highlighting
     }
 
+    # Languages Jira accepts but whose highlighter damages the content.
+    # Jira's YAML highlighter swallows the newline after a line ending in
+    # a bare "key:", so a nested mapping renders on one line - the block
+    # is unreadable and the indentation, which is YAML's syntax, is gone.
+    # Plain {code} keeps the text intact at the cost of colouring.
+    # Verified against Jira DC 10.3; every other supported language is
+    # fine (tests/e2e/test_markup_rendering_dc.py::test_code_block_
+    # languages_keep_their_line_breaks).
+    BROKEN_JIRA_HIGHLIGHTERS = {"yaml", "yml"}
+
     # Step 2: Mapping for unsupported languages to closest valid JIRA alternative
     # Only map to actual JIRA languages; unmapped languages will return None → {code}
     LANGUAGE_MAPPING = {
@@ -1230,6 +1240,10 @@ class JiraPreprocessor(BasePreprocessor):
             return None
 
         lang_lower = lang.lower()
+
+        # Step 0: Refuse highlighters that mangle the block
+        if lang_lower in self.BROKEN_JIRA_HIGHLIGHTERS:
+            return None
 
         # Step 1: Check if already valid JIRA language
         if lang_lower in self.VALID_JIRA_LANGUAGES:

@@ -2301,3 +2301,26 @@ class TestJiraMacroPassthrough:
         assert preprocessor.markdown_to_jira("{madeup}x{madeup}") == (
             "&#123;madeup&#125;x&#123;madeup&#125;"
         )
+
+
+class TestBrokenHighlighters:
+    """Jira accepts some languages whose highlighter damages the block."""
+
+    @pytest.fixture
+    def preprocessor(self):
+        return JiraPreprocessor(base_url="https://example.atlassian.net")
+
+    @pytest.mark.parametrize("language", ["yaml", "yml", "YAML"])
+    def test_yaml_falls_back_to_plain_code(self, preprocessor, language):
+        """Jira's YAML highlighter eats the newline after a bare "key:",
+        collapsing a nested mapping onto one line - and indentation is
+        YAML's syntax. Plain {code} keeps the block readable."""
+        result = preprocessor.markdown_to_jira(
+            f"```{language}\nresources:\n  limits:\n    memory: 2Gi\n```"
+        )
+        assert result == "{code}\nresources:\n  limits:\n    memory: 2Gi\n{code}"
+
+    def test_other_languages_still_highlight(self, preprocessor):
+        assert preprocessor.markdown_to_jira("```python\nx = 1\n```") == (
+            "{code:python}\nx = 1\n{code}"
+        )

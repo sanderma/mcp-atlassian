@@ -433,7 +433,10 @@ class TestFieldsMixin:
         mock_option_field = {
             "id": "customfield_10024",
             "name": "Severity",
-            "schema": {"type": "option", "custom": "radiobuttons"},
+            "schema": {
+                "type": "option",
+                "custom": "com.atlassian.jira.plugin.system.customfieldtypes:radiobuttons",
+            },
         }
         fields_mixin.get_field_by_id = MagicMock(return_value=mock_option_field)
 
@@ -719,7 +722,10 @@ class TestFormatFieldValueForWrite:
     def test_cascading_select(self, mixin, test_id, value, expected):
         field_def = {
             "name": "Region",
-            "schema": {"type": "option-with-child", "custom": "cascadingselect"},
+            "schema": {
+                "type": "option-with-child",
+                "custom": "com.atlassian.jira.plugin.system.customfieldtypes:cascadingselect",
+            },
         }
         result = mixin._format_field_value_for_write(
             "customfield_10020", value, field_def
@@ -828,7 +834,11 @@ class TestFormatFieldValueForWrite:
     def test_multiselect(self, mixin, test_id, value, expected):
         field_def = {
             "name": "Categories",
-            "schema": {"type": "array", "items": "option", "custom": "multiselect"},
+            "schema": {
+                "type": "array",
+                "items": "option",
+                "custom": "com.atlassian.jira.plugin.system.customfieldtypes:multiselect",
+            },
         }
         result = mixin._format_field_value_for_write(
             "customfield_10021", value, field_def
@@ -868,7 +878,10 @@ class TestFormatFieldValueForWrite:
         mixin._get_account_id = MagicMock(return_value=resolved_id)
         field_def = {
             "name": "Reviewer",
-            "schema": {"type": "user", "custom": "userpicker"},
+            "schema": {
+                "type": "user",
+                "custom": "com.atlassian.jira.plugin.system.customfieldtypes:userpicker",
+            },
         }
         result = mixin._format_field_value_for_write(
             "customfield_10022", user_input, field_def
@@ -880,7 +893,10 @@ class TestFormatFieldValueForWrite:
         mixin._get_account_id = MagicMock(side_effect=ValueError("User not found"))
         field_def = {
             "name": "Reviewer",
-            "schema": {"type": "user", "custom": "userpicker"},
+            "schema": {
+                "type": "user",
+                "custom": "com.atlassian.jira.plugin.system.customfieldtypes:userpicker",
+            },
         }
         result = mixin._format_field_value_for_write(
             "customfield_10022", "nobody@ex.com", field_def
@@ -915,7 +931,10 @@ class TestFormatFieldValueForWrite:
     def test_option_field(self, mixin, test_id, value, expected):
         field_def = {
             "name": "Severity",
-            "schema": {"type": "option", "custom": "radiobuttons"},
+            "schema": {
+                "type": "option",
+                "custom": "com.atlassian.jira.plugin.system.customfieldtypes:radiobuttons",
+            },
         }
         result = mixin._format_field_value_for_write(
             "customfield_10024", value, field_def
@@ -1124,3 +1143,99 @@ class TestChecklistFieldFormatting:
         )
         # Should pass through unchanged (no checklist conversion)
         assert result == ["a", "b"]
+
+
+class TestThirdPartyCustomFields:
+    """A plugin's custom field has no documented value contract.
+
+    Jira's own custom fields do: a single-select takes
+    ``{"value": "..."}``, so lifting a bare string into that object is a
+    convenience worth having. A field from a third-party plugin is a
+    different matter — Jira's Team field wants its raw id and rejects
+    the wrapper with "operation must be string" (#3) — so the string the
+    caller supplied is sent as it stands.
+    """
+
+    NATIVE = "com.atlassian.jira.plugin.system.customfieldtypes:"
+    PLUGIN = "com.atlassian.teams:rm-teams-custom-field-team"
+
+    @pytest.fixture
+    def mixin(self, jira_fetcher: JiraFetcher) -> FieldsMixin:
+        fetcher = jira_fetcher
+        fetcher._get_account_id = MagicMock(return_value="resolved-id")
+        fetcher.config = MagicMock()
+        fetcher.config.is_cloud = False
+        return fetcher
+
+    def _definition(self, custom: str, **schema) -> dict:
+        return {"name": "Field", "schema": {"custom": custom, **schema}}
+
+    def test_plugin_select_keeps_the_raw_string(self, mixin):
+        result = mixin._format_field_value_for_write(
+            "customfield_11472", "4863", self._definition(self.PLUGIN, type="option")
+        )
+        assert result == "4863"
+
+    def test_plugin_array_keeps_the_raw_string(self, mixin):
+        result = mixin._format_field_value_for_write(
+            "customfield_11472",
+            "4863",
+            self._definition(self.PLUGIN, type="array", items="option"),
+        )
+        assert result == "4863"
+
+    def test_plugin_cascading_keeps_the_raw_string(self, mixin):
+        result = mixin._format_field_value_for_write(
+            "customfield_11472",
+            "4863",
+            self._definition(self.PLUGIN, type="option-with-child"),
+        )
+        assert result == "4863"
+
+    def test_plugin_field_still_accepts_an_object(self, mixin):
+        """A caller who knows the plugin wants an object can send one."""
+        value = {"value": "Team Alpha"}
+        result = mixin._format_field_value_for_write(
+            "customfield_11472", value, self._definition(self.PLUGIN, type="option")
+        )
+        assert result == value
+
+    def test_native_select_still_lifts_a_string(self, mixin):
+        result = mixin._format_field_value_for_write(
+            "customfield_10101",
+            "Alpha",
+            self._definition(self.NATIVE + "select", type="option"),
+        )
+        assert result == {"value": "Alpha"}
+
+    def test_native_multiselect_still_splits_a_csv_string(self, mixin):
+        result = mixin._format_field_value_for_write(
+            "customfield_10101",
+            "a,b",
+            self._definition(self.NATIVE + "multiselect", type="array", items="option"),
+        )
+        assert result == [{"value": "a"}, {"value": "b"}]
+
+    def test_native_cascading_still_lifts_a_string(self, mixin):
+        result = mixin._format_field_value_for_write(
+            "customfield_10101",
+            "Parent",
+            self._definition(self.NATIVE + "cascadingselect", type="option-with-child"),
+        )
+        assert result == {"value": "Parent"}
+
+    def test_plugin_date_is_still_normalized(self, mixin):
+        """Only the value-wrapping handlers step aside; a date is a date
+        whoever ships the field."""
+        result = mixin._format_field_value_for_write(
+            "customfield_11472",
+            "2026-03-01",
+            self._definition("com.acme:datefield", type="date"),
+        )
+        assert result == "2026-03-01"
+
+    def test_a_field_with_no_custom_type_is_untouched(self, mixin):
+        result = mixin._format_field_value_for_write(
+            "customfield_11472", "raw", {"name": "Field", "schema": {"type": "any"}}
+        )
+        assert result == "raw"

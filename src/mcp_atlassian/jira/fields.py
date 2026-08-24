@@ -12,6 +12,26 @@ from .protocols import EpicOperationsProto, UsersOperationsProto
 logger = logging.getLogger("mcp-jira")
 
 
+# Custom field types that ship with Jira. Their REST contract is
+# documented and stable, so a bare string can be lifted into the object
+# the API expects ({"value": "..."} for a select, and so on).
+_NATIVE_CUSTOM_FIELD_PREFIX = "com.atlassian.jira.plugin.system.customfieldtypes:"
+
+# The schema types whose handlers do that lifting. A field from a
+# third-party plugin has no such contract - Jira's Team field wants its
+# raw id and rejects the wrapper with "operation must be string" - so a
+# string the caller supplied is sent as it stands, and a caller who does
+# need an object can pass one.
+_VALUE_WRAPPING_SCHEMA_TYPES = frozenset({"option", "option-with-child", "array"})
+
+
+def _is_third_party_custom_field(schema_custom: Any) -> bool:
+    """True when a custom field comes from a plugin, not from Jira."""
+    return isinstance(schema_custom, str) and not schema_custom.startswith(
+        _NATIVE_CUSTOM_FIELD_PREFIX
+    )
+
+
 class FieldsMixin(JiraClient, EpicOperationsProto, UsersOperationsProto):
     """Mixin for Jira field operations.
 
@@ -496,7 +516,12 @@ class FieldsMixin(JiraClient, EpicOperationsProto, UsersOperationsProto):
                 "date": self._format_date,
                 "datetime": self._format_datetime,
             }.get(schema_type)
-            if schema_handler:
+            wraps_a_bare_string = (
+                schema_type in _VALUE_WRAPPING_SCHEMA_TYPES
+                and isinstance(value, str)
+                and _is_third_party_custom_field(schema_custom)
+            )
+            if schema_handler and not wraps_a_bare_string:
                 return schema_handler(value, field_id, field_definition)
 
         # Rich-text custom fields accept Markdown the same way the description field does:

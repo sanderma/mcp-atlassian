@@ -46,9 +46,9 @@ from .test_jira_markup_validity import assert_valid_jira_markup
 HAZARD_ALPHABET = "ab12 \t*_-+^~[]{}|!?()&#:;.\\<>\"'%@/"
 
 fragment = st.text(alphabet=HAZARD_ALPHABET, min_size=0, max_size=24)
-line = st.text(
-    alphabet=HAZARD_ALPHABET.replace("\t", ""), min_size=0, max_size=24
-).map(lambda s: s.replace("\n", " "))
+line = st.text(alphabet=HAZARD_ALPHABET.replace("\t", ""), min_size=0, max_size=24).map(
+    lambda s: s.replace("\n", " ")
+)
 
 
 @st.composite
@@ -101,10 +101,16 @@ def table(draw: st.DrawFn) -> str:
         min_size=0,
         max_size=12,
     )
-    rows = draw(st.lists(st.lists(cell, min_size=columns, max_size=columns),
-                         min_size=1, max_size=3))
-    header = "| " + " | ".join(draw(st.lists(cell, min_size=columns,
-                                             max_size=columns))) + " |"
+    rows = draw(
+        st.lists(
+            st.lists(cell, min_size=columns, max_size=columns), min_size=1, max_size=3
+        )
+    )
+    header = (
+        "| "
+        + " | ".join(draw(st.lists(cell, min_size=columns, max_size=columns)))
+        + " |"
+    )
     divider = "|" + "---|" * columns
     body = ["| " + " | ".join(row) + " |" for row in rows]
     return "\n".join([header, divider, *body])
@@ -131,8 +137,14 @@ def inline_rich(draw: st.DrawFn) -> str:
 
 
 BLOCK = st.one_of(
-    paragraph(), heading(), bullet_list(), ordered_list(),
-    quote(), fenced_code(), table(), inline_rich(),
+    paragraph(),
+    heading(),
+    bullet_list(),
+    ordered_list(),
+    quote(),
+    fenced_code(),
+    table(),
+    inline_rich(),
 )
 
 document = st.lists(BLOCK, min_size=1, max_size=4).map("\n\n".join)
@@ -189,9 +201,7 @@ class TestConversionProperties:
         cycles = [preprocessor.markdown_to_jira(markdown)]
         for _ in range(4):
             cycles.append(
-                preprocessor.markdown_to_jira(
-                    preprocessor.jira_to_markdown(cycles[-1])
-                )
+                preprocessor.markdown_to_jira(preprocessor.jira_to_markdown(cycles[-1]))
             )
         assert cycles[-1] == cycles[-2], f"never settles: {cycles}"
 

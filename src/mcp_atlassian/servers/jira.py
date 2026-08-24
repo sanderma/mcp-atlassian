@@ -2184,7 +2184,14 @@ async def update_issue(
             description=(
                 "(Optional) JSON string of additional fields to update. "
                 "Use this for custom fields or more complex updates. "
-                'Link to epic: {"epicKey": "EPIC-123"} or {"epic_link": "EPIC-123"}.'
+                'Link to epic: {"epicKey": "EPIC-123"} or {"epic_link": "EPIC-123"}. '
+                "For a custom field that Jira itself provides, a plain "
+                'string is lifted into the object the API expects ("High" '
+                'becomes {"value": "High"}). A field from a third-party '
+                "plugin has no such contract, so a plain string is sent "
+                "exactly as given - pass the raw value the plugin wants "
+                '(e.g. {"customfield_11472": "4863"}), or pass an object '
+                "yourself if it expects one."
             ),
             default=None,
         ),

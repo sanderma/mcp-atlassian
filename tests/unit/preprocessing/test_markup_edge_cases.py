@@ -235,9 +235,7 @@ class TestCodeBlockShapes:
     def test_content_mentioning_both_delimiters_keeps_code(self, preprocessor):
         """Neither delimiter is safe; {code} is the least-bad choice and
         the degradation is documented rather than silently mangled."""
-        result = preprocessor.markdown_to_jira(
-            "```\n{code} and {noformat}\n```"
-        )
+        result = preprocessor.markdown_to_jira("```\n{code} and {noformat}\n```")
         assert result.startswith("{code}")
         assert "{code} and {noformat}" in result
 
@@ -497,9 +495,7 @@ class TestEmptyListItems:
         that. Rendering the split faithfully put a blank line inside what
         Jira reads as one list, and the markup then flipped between the
         two forms on every edit."""
-        assert preprocessor.markdown_to_jira("- \n- |\n- ") == (
-            "* \n* &#124;\n* "
-        )
+        assert preprocessor.markdown_to_jira("- \n- |\n- ") == ("* \n* &#124;\n* ")
         assert preprocessor.markdown_to_jira("- a\n\n- b") == "* a\n* b"
 
     def test_a_list_separated_by_real_content_stays_separate(self, preprocessor):
@@ -569,12 +565,10 @@ class TestLinkAndImageShapes:
         )
 
     def test_empty_target_is_not_a_link(self, preprocessor):
-        """"[text|]" is not link markup, and the stray pipe splits a
+        """ "[text|]" is not link markup, and the stray pipe splits a
         table cell."""
         assert preprocessor.markdown_to_jira("[text]()") == "text"
-        assert preprocessor.markdown_to_jira("| [1]() |\n|---|\n|  |") == (
-            "||1||\n| |"
-        )
+        assert preprocessor.markdown_to_jira("| [1]() |\n|---|\n|  |") == ("||1||\n| |")
 
     def test_empty_image_source_is_not_an_image(self, preprocessor):
         assert preprocessor.markdown_to_jira("![alt]()") == "alt"
@@ -582,9 +576,12 @@ class TestLinkAndImageShapes:
     def test_nested_image_keeps_its_own_delimiters(self, preprocessor):
         """The "|" and "!" neutralization applies to author text, not to
         markup this renderer emitted."""
-        assert preprocessor.markdown_to_jira(
-            "[![alt](https://x.test/i.png)](https://x.test)"
-        ) == "[!https://x.test/i.png|alt=alt!|https://x.test]"
+        assert (
+            preprocessor.markdown_to_jira(
+                "[![alt](https://x.test/i.png)](https://x.test)"
+            )
+            == "[!https://x.test/i.png|alt=alt!|https://x.test]"
+        )
 
     def test_image_source_braces_are_percent_encoded(self, preprocessor):
         assert preprocessor.markdown_to_jira("![a](https://x.test/a{b}.png)") == (
@@ -592,7 +589,7 @@ class TestLinkAndImageShapes:
         )
 
     def test_image_with_a_bang_in_the_url_falls_back_to_the_alt(self, preprocessor):
-        """"!" ends image markup and Jira accepts no encoding for it
+        """ "!" ends image markup and Jira accepts no encoding for it
         there; the alternative is markup that eats the paragraph."""
         assert preprocessor.markdown_to_jira("![the chart](we!rd.png)") == "the chart"
 
@@ -605,7 +602,7 @@ class TestLinkAndImageShapes:
         assert preprocessor.jira_to_markdown("!x.png|thumbnail!") == "![](x.png)"
 
     def test_caret_opening_a_link_alias_is_escaped(self, preprocessor):
-        """"[^name]" is Jira's attachment-link syntax, so an alias that
+        """ "[^name]" is Jira's attachment-link syntax, so an alias that
         opens with a caret becomes a broken attachment reference."""
         assert preprocessor.markdown_to_jira("[^1](https://x.test/p)") == (
             "[\\^1|https://x.test/p]"
@@ -632,9 +629,7 @@ class TestTableCellHazards:
         )
 
     def test_link_pipes_are_structural_and_survive(self, preprocessor):
-        result = preprocessor.markdown_to_jira(
-            "| p |\n|---|\n| [t](https://x.test) |"
-        )
+        result = preprocessor.markdown_to_jira("| p |\n|---|\n| [t](https://x.test) |")
         assert result == "||p||\n|[t|https://x.test]|"
 
     def test_line_start_token_in_a_cell(self, preprocessor):

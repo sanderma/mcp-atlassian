@@ -1943,9 +1943,15 @@ class TestJiraToMarkdownParser:
         result = preprocessor.jira_to_markdown("this is -removed- text")
         assert "~~removed~~" in result
 
-    def test_mention_converted(self, preprocessor):
+    def test_mention_preserved(self, preprocessor):
+        """@jdoe cannot be written back as a mention, so the wiki form
+        stays; the write path passes it through untouched."""
         result = preprocessor.jira_to_markdown("[~jdoe] please review")
-        assert "@jdoe" in result
+        assert result == "[~jdoe] please review"
+        assert preprocessor.jira_to_markdown("[~accountid:a-1] hi") == (
+            "[~accountid:a-1] hi"
+        )
+        assert preprocessor.jira_to_markdown("[Jane|~jdoe] hi") == "[~jdoe] hi"
 
     def test_oversized_input_uses_regex_fallback(self, preprocessor):
         import time
@@ -2042,11 +2048,16 @@ class TestRendererValidatedEscaping:
 
     def test_intraword_emphasis_restored_as_literal_text(self, preprocessor):
         """CommonMark parses 2*3*4 as emphasis; Jira cannot render
-        intraword effects, so the author's characters are restored."""
+        intraword effects, so the author's characters are restored.
+
+        Backslashes rather than entities: the renderer treats the two
+        identically here, and the read path can invert a backslash, so a
+        read-modify-write cycle comes back to the same markup.
+        """
         result = preprocessor.markdown_to_jira("2*3*4 = 24")
-        assert result == "2&#42;3&#42;4 = 24"
+        assert result == r"2\*3\*4 = 24"
         result = preprocessor.markdown_to_jira("2**3**4 = x")
-        assert result == "2&#42;&#42;3&#42;&#42;4 = x"
+        assert result == r"2\*\*3\*\*4 = x"
 
     def test_boundary_emphasis_still_converts(self, preprocessor):
         assert preprocessor.markdown_to_jira("a *b* c") == "a _b_ c"
@@ -2094,3 +2105,175 @@ class TestRendererValidatedEscaping:
         """Soft-broken paragraph lines are line starts for Jira too."""
         result = preprocessor.markdown_to_jira("note this:\nh3. not a heading")
         assert "h3&#46; not a heading" in result
+
+
+# Every construct an agent is likely to write, plus the ones that broke
+# a round trip before. Names are the pytest ids.
+ROUND_TRIP_CORPUS = [
+    ("heading", "# Title\n\nSome **bold** and *em* text.\n"),
+    ("heading-deep", "## Sub\n\n###### Six\n"),
+    ("table", "| a | b |\n| --- | --- |\n| 1 | 2 |\n"),
+    ("table-empty-cell", "| a | b |\n| --- | --- |\n|  | 2 |\n"),
+    ("table-specials", "| h1 | h2 |\n| --- | --- |\n| a*b | c_d |\n"),
+    ("table-inline-code", "| a | `x|y` |\n| --- | --- |\n| 1 | 2 |\n"),
+    ("list-bullet", "- one\n- two\n  - nested\n"),
+    ("list-ordered", "1. one\n2. two\n"),
+    ("list-mixed", "1. one\n   - sub\n2. two\n"),
+    ("list-task", "- [ ] todo\n- [x] done\n"),
+    ("code-lang", "```python\nprint('hi')\n```\n"),
+    ("code-plain", "```\nplain\n```\n"),
+    ("code-fence-in-fence", "````\nhas ``` inside\n````\n"),
+    ("code-jira-macros", "```\n{code} and {panel}\n```\n"),
+    ("code-in-list", "- item\n\n  ```\n  code\n  ```\n"),
+    ("quote", "> quoted line\n"),
+    ("quote-multi", "> line one\n> line two\n"),
+    ("quote-list", "> - a\n> - b\n"),
+    ("rule", "a\n\n---\n\nb\n"),
+    ("link", "[text](https://example.com/x)"),
+    ("autolink", "<https://example.com/x>"),
+    ("bare-url", "visit https://example.com/a?b=c&d=e now"),
+    ("url-underscores", "see https://example.com/a_b_c now"),
+    ("image", "![the diagram](https://example.com/i.png)"),
+    ("mention", "hi [~jdoe] there"),
+    ("issue-key", "see PROJ-123 for details"),
+    ("emphasis", "a *b* c **d** e"),
+    ("emphasis-both", "***both***"),
+    ("emphasis-nested-code", "**bold with `code` inside**"),
+    ("strikethrough", "~~gone~~"),
+    ("intraword", "config and 2*3*4 and f(x)"),
+    ("intraword-underscore", "snake_case_name"),
+    ("inline-code", "use `{json}` here"),
+    ("inline-code-specials", "`a*b_c[d]e{f}g|h!i?j-k+l^m~n&o`"),
+    ("inline-code-entity", "literal `&#123;` entity"),
+    ("prose-braces", "use {code} in prose"),
+    ("prose-brackets", "array[0] and [not a link]"),
+    ("prose-pipe", "a | b"),
+    ("prose-caret", "a^b and E=mc^2^"),
+    ("prose-punctuation", "wow! really? (yes)"),
+    ("prose-hyphens", "a - b -- c"),
+    ("prose-ampersand", "AT&T and 5 < 6"),
+    ("emoticon", "smile :) here"),
+    ("windows-path", "C:\\Users\\test\\file.txt"),
+    ("escaped-star", "literal \\* star"),
+    ("escaped-ordered", "1\\. not a list"),
+    ("escaped-paren", "1\\) not a list"),
+    ("escaped-plus", "\\+ plus lead"),
+    ("escaped-dash", "\\- dash lead"),
+    ("escaped-quote", "\\> not a quote"),
+    ("escaped-hash", "\\# hash"),
+    ("html-tag", "use <div> tag"),
+    ("mixed", "# T\n\n**b** `c{d}` [l](https://e.com)\n\n- x*y\n"),
+]
+
+
+class TestRoundTripStability:
+    """An agent reads an issue, edits it, and writes it back.
+
+    Conversion is lossy in one direction - Jira has no Markdown - but it
+    must be *stable*: after the first write, another read-modify-write
+    cycle has to produce byte-identical markup. Without that, repeated
+    edits accumulate escapes until the text is unrecognisable (a literal
+    ``*`` grew a backslash per cycle until ``\\\\`` became a line break).
+    """
+
+    @pytest.fixture
+    def preprocessor(self):
+        return JiraPreprocessor(base_url="https://example.atlassian.net")
+
+    @pytest.mark.parametrize(
+        "markdown",
+        [c[1] for c in ROUND_TRIP_CORPUS],
+        ids=[c[0] for c in ROUND_TRIP_CORPUS],
+    )
+    def test_markup_is_stable_across_cycles(self, preprocessor, markdown):
+        cycles = []
+        current = markdown
+        for _ in range(4):
+            markup = preprocessor.markdown_to_jira(current)
+            cycles.append(markup)
+            current = preprocessor.jira_to_markdown(markup)
+        assert cycles[1] == cycles[2] == cycles[3], (
+            f"markup drifts across cycles: {cycles}"
+        )
+
+    def test_literal_star_does_not_accumulate_backslashes(self, preprocessor):
+        """The regression this class exists for: \\\\ is a Jira line break,
+        so a doubling backslash eventually injects a newline."""
+        markup = preprocessor.markdown_to_jira("2*3*4")
+        for _ in range(4):
+            markup = preprocessor.markdown_to_jira(
+                preprocessor.jira_to_markdown(markup)
+            )
+        assert markup == r"2\*3\*4"
+
+    def test_mention_survives_a_cycle(self, preprocessor):
+        """A mention downgraded to @name would stop notifying anyone."""
+        markup = preprocessor.markdown_to_jira("ping [~jdoe] please")
+        assert markup == "ping [~jdoe] please"
+        assert preprocessor.jira_to_markdown(markup) == "ping [~jdoe] please"
+
+    def test_image_alt_survives_a_cycle(self, preprocessor):
+        markup = preprocessor.markdown_to_jira("![the diagram](i.png)")
+        assert markup == "!i.png|alt=the diagram!"
+        assert preprocessor.jira_to_markdown(markup) == "![the diagram](i.png)"
+
+    def test_jira_prose_line_starts_stay_prose(self, preprocessor):
+        """Jira numbers lists with #, so "1." and ">" are plain text
+        there and must not become Markdown blocks on the way back."""
+        assert preprocessor.jira_to_markdown("1. not a list") == r"1\. not a list"
+        assert preprocessor.jira_to_markdown("> not a quote") == r"\> not a quote"
+        assert preprocessor.jira_to_markdown("+ not a bullet") == r"\+ not a bullet"
+
+    def test_jira_lists_still_convert(self, preprocessor):
+        """The line-start guard must not touch real Jira lists."""
+        assert preprocessor.jira_to_markdown("# one\n# two") == "1. one\n1. two"
+        assert preprocessor.jira_to_markdown("* one\n* two") == "- one\n- two"
+        assert preprocessor.jira_to_markdown("bq. quoted") == "> quoted"
+
+    def test_escapes_inside_code_are_left_alone(self, preprocessor):
+        """A backslash is literal text inside {code} and {{monospace}}."""
+        assert "C:\\path\\to" in preprocessor.jira_to_markdown(
+            "{noformat}\nC:\\path\\to\n{noformat}"
+        )
+        assert preprocessor.jira_to_markdown("{{a\\*b}}") == "`a\\*b`"
+
+
+class TestJiraMacroPassthrough:
+    """Jira-native syntax with no Markdown equivalent must survive a cycle.
+
+    {anchor:name} is a real Jira macro that jira2markdown hands back
+    verbatim; entity-encoding it on the way in would destroy the link
+    target the first time an agent edited the issue. The Confluence-only
+    macros are the opposite case - Jira shows them as literal text, so
+    escaping them is what a reader expects.
+    """
+
+    @pytest.fixture
+    def preprocessor(self):
+        return JiraPreprocessor(base_url="https://example.atlassian.net")
+
+    def test_anchor_survives_the_write_path(self, preprocessor):
+        assert preprocessor.markdown_to_jira("{anchor:rel-2}") == "{anchor:rel-2}"
+        assert preprocessor.markdown_to_jira("see {anchor:x} here") == (
+            "see {anchor:x} here"
+        )
+
+    def test_anchor_round_trips(self, preprocessor):
+        markup = "{anchor:rel-2}\n\nRelease notes"
+        for _ in range(3):
+            markup = preprocessor.markdown_to_jira(
+                preprocessor.jira_to_markdown(markup)
+            )
+        assert "{anchor:rel-2}" in markup
+
+    def test_confluence_only_macros_stay_literal(self, preprocessor):
+        """Jira renders these as text, so they are escaped like any brace."""
+        assert preprocessor.markdown_to_jira("use {note} in prose") == (
+            "use &#123;note&#125; in prose"
+        )
+        assert preprocessor.markdown_to_jira("{toc}") == "&#123;toc&#125;"
+
+    def test_unknown_macro_is_still_escaped(self, preprocessor):
+        assert preprocessor.markdown_to_jira("{madeup}x{madeup}") == (
+            "&#123;madeup&#125;x&#123;madeup&#125;"
+        )

@@ -602,6 +602,41 @@ CORPUS: list[Case] = [
         [],
         [],
     ),
+    # --- Markdown block openers Jira reads as prose ---
+    (
+        "escaped-ordered-line",
+        "1\\. not a list",
+        ["1. not a list"],
+        [],
+        [],
+        ["<ol"],
+    ),
+    (
+        "escaped-quote-line",
+        "\\> not a quote",
+        ["> not a quote"],
+        [],
+        [],
+        ["<blockquote"],
+    ),
+    ("escaped-plus-line", "\\+ plus lead", ["+ plus lead"], [], [], ["<ul"]),
+    # --- Jira-native macros ---
+    (
+        "macro-anchor",
+        "{anchor:rel-2}\n\nRelease notes",
+        ["Release notes"],
+        [],
+        ["<a name="],
+        [],
+    ),
+    (
+        "confluence-macro-is-literal",
+        "write {note} to make a note",
+        ["{note}"],
+        [],
+        [],
+        [],
+    ),
     # --- composition ---
     (
         "kitchen-sink",
@@ -707,3 +742,59 @@ def test_rendered_issue_description_round_trip(
         assert "&#" not in text
     finally:
         session.delete(f"{base_url}/rest/api/2/issue/{key}", timeout=30)
+
+
+# Markdown an agent plausibly writes, exercised through a full
+# read-modify-write cycle rather than a single conversion.
+ROUND_TRIP_CASES = [
+    ("heading-text", "# Release\n\nShip **now** with *care*."),
+    ("table", "| k | v |\n|---|---|\n| `a|b` | **ok** |"),
+    ("list", "1. one\n2. two\n\n- a\n- b"),
+    ("code", "```python\nprint('{hi}')\n```"),
+    ("quote", "> check the `{code}` docs"),
+    ("prose-specials", "config `{json}`, 2*3*4, f(x), a|b, AT&T"),
+    ("links", "see [docs](https://x.test/a_b) and https://x.test/c_d"),
+    ("mention", "ping [~admin] about PROJ-12"),
+    ("image", "![the diagram](https://x.test/i.png)"),
+    ("escaped-openers", "1\\. not a list\n\n\\> not a quote"),
+    ("anchor", "{anchor:rel-2}\n\nRelease notes"),
+]
+
+
+@pytest.mark.parametrize(
+    "markdown", [c[1] for c in ROUND_TRIP_CASES], ids=[c[0] for c in ROUND_TRIP_CASES]
+)
+def test_round_trip_renders_identically(
+    jira_render_session: tuple[requests.Session, str],
+    preprocessor: JiraPreprocessor,
+    markdown: str,
+) -> None:
+    """An agent that reads, edits and writes back must not change the page.
+
+    Converting is lossy - Jira has no Markdown - so the guarantee is
+    stability: the markup after one cycle is what Jira keeps forever,
+    and what a reader sees does not shift underneath them.
+    """
+    first = preprocessor.markdown_to_jira(markdown)
+    second = preprocessor.markdown_to_jira(preprocessor.jira_to_markdown(first))
+    third = preprocessor.markdown_to_jira(preprocessor.jira_to_markdown(second))
+    assert second == third, f"markup drifts\n1={first!r}\n2={second!r}\n3={third!r}"
+
+    session, base_url = jira_render_session
+
+    def visible(markup: str) -> str:
+        response = session.post(
+            f"{base_url}/rest/api/1.0/render",
+            json={
+                "rendererType": "atlassian-wiki-renderer",
+                "unrenderedMarkup": markup,
+            },
+            headers={"X-Atlassian-Token": "no-check"},
+            timeout=30,
+        )
+        assert response.status_code == 200, response.text[:300]
+        return BeautifulSoup(response.text, "html.parser").get_text()
+
+    assert visible(first) == visible(second), (
+        f"rendering shifts after one edit cycle\n1={first!r}\n2={second!r}"
+    )

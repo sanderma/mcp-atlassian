@@ -26,6 +26,8 @@ from typing import Any
 from jira2markdown import convert as _jira2markdown_convert
 from jira2markdown.elements import MarkupElements
 from jira2markdown.markup.advanced import Code, Noformat
+from jira2markdown.markup.images import Image
+from jira2markdown.markup.links import Mention
 from jira2markdown.markup.text_effects import Monospaced
 from mistletoe.block_token import Document
 from mistletoe.contrib import jira_renderer as jira_renderer_module
@@ -89,10 +91,46 @@ class _Monospaced(Monospaced):
         return f"{delim} {content} {delim}"
 
 
+class _Image(Image):
+    """!url|alt=text! conversion that keeps the alt text.
+
+    jira2markdown discards every attribute but width and height and uses
+    the URL as the alt, so the description an author wrote is lost on the
+    first read and cannot be written back.
+    """
+
+    def action(self, tokens: ParseResults) -> str:
+        attrs = self._parse_attrs(tokens.attrs or [])
+        alt = attrs.get("alt") or tokens.url
+        sized = " ".join(
+            f"{name}={value}"
+            for name, value in attrs.items()
+            if name in self.ALLOWED_ATTRS
+        )
+        suffix = f"{{{sized}}}" if sized else ""
+        return f"![{alt}]({tokens.url}){suffix}"
+
+
+class _Mention(Mention):
+    """[~user] passthrough.
+
+    jira2markdown renders a mention as ``@user``, which the write path
+    cannot turn back into a mention — an agent reading and rewriting a
+    description would silently drop it. The wiki form survives the write
+    path verbatim, so it is kept.
+    """
+
+    def action(self, tokens: ParseResults) -> str:
+        original = str(tokens[0])
+        return original if original.startswith("[~") else f"[~{tokens.accountid}]"
+
+
 _WIKI_ELEMENTS = MarkupElements()
 _WIKI_ELEMENTS.replace(Code, _CodeBlock)
 _WIKI_ELEMENTS.replace(Noformat, _Noformat)
 _WIKI_ELEMENTS.replace(Monospaced, _Monospaced)
+_WIKI_ELEMENTS.replace(Image, _Image)
+_WIKI_ELEMENTS.replace(Mention, _Mention)
 
 
 @lru_cache(maxsize=128)
@@ -114,6 +152,14 @@ _JIRA_NESTED_LIST_RE = r"^(?!#+ )[*#]{2,} .*$"
 # Jira user mentions like [~username] or [~accountid:...] must survive
 # Markdown parsing untouched.
 _JIRA_MENTION_RE = r"\[~[^\]\n]+\]"
+
+# Jira renders {anchor:name} as a link target and the read path hands it
+# back verbatim, so the write path has to accept it: entity-encoding it
+# would destroy the anchor the moment an agent edited the issue. The
+# Confluence-only macros ({note}, {info}, {tip}, {toc}, ...) are *not*
+# listed - Jira leaves them as literal text, so escaping them is right.
+_JIRA_ANCHOR_MACRO_RE = re.compile(r"\{anchor:[^}\n]+\}")
+
 
 # Issue keys may carry numeric segments (e.g. PROJ-123-45) on some
 # Server/DC setups (issue #1476).
@@ -162,8 +208,11 @@ def _repair_intraword_emphasis(markup: str) -> str:
         blocks,
         "EMPHFIX",
     )
-    text = _INTRAWORD_EM_RE.sub(r"&#42;\1&#42;", text)
-    text = _INTRAWORD_STRONG_RE.sub(r"&#42;&#42;\1&#42;&#42;", text)
+    # Backslash escapes rather than entities, matching how every other
+    # literal text effect is emitted, so the read path can invert this
+    # with one rule and a read-modify-write cycle stays stable.
+    text = _INTRAWORD_EM_RE.sub(r"\\*\1\\*", text)
+    text = _INTRAWORD_STRONG_RE.sub(r"\\*\\*\1\\*\\*", text)
     return _restore_blocks(text, blocks, "EMPHFIX")
 
 
@@ -237,6 +286,130 @@ def _neutralize_line_start(line: str) -> str:
         if count:
             return new_line
     return line
+
+
+# Characters the write path escapes in prose, and which therefore have to
+# be un-escaped on the way back so a read-modify-write cycle is stable.
+_JIRA_ESCAPABLE = "*_-+^~[]{}|!?()&#:;."
+
+# Of those, the ones that would be re-parsed as Markdown if handed back
+# bare, so they are returned escaped for Markdown instead.
+_MARKDOWN_SPECIAL = set("*_[]`\\")
+
+_JIRA_ESCAPE_RE = re.compile(r"\\([" + re.escape(_JIRA_ESCAPABLE) + r"])")
+_NUMERIC_ENTITY_RE = re.compile(r"&#(\d{1,4});")
+
+
+# Characters that start a Markdown block construct, and so need escaping
+# when a restored literal lands at the beginning of a line.
+_LINE_START_MARKDOWN = set("+-*#>|~=")
+
+
+def _to_markdown_literal(char: str) -> str:
+    """Represent ``char`` as literal text in Markdown."""
+    return f"\\{char}" if char in _MARKDOWN_SPECIAL else char
+
+
+def _markdown_literal_at(char: str, text: str, index: int) -> str:
+    """Represent ``char`` literally, given where in ``text`` it lands.
+
+    Position matters: a ``+`` mid-sentence is plain text, but the same
+    ``+`` opening a line is a bullet, and ``.`` after a leading number is
+    an ordered list.
+    """
+    line = text[text.rfind("\n", 0, index) + 1 : index]
+    if not line.strip():
+        if char in _LINE_START_MARKDOWN:
+            return f"\\{char}"
+    elif char in ".)" and line.strip().isdigit():
+        return f"\\{char}"
+    return _to_markdown_literal(char)
+
+
+# Regions where a backslash is literal text rather than an escape, so
+# lifting escapes out of them would corrupt the content.
+_JIRA_VERBATIM_RE = re.compile(
+    r"\{code(?::[^}]*)?\}.*?\{code\}"
+    r"|\{noformat(?::[^}]*)?\}.*?\{noformat\}"
+    r"|\{\{.*?\}\}",
+    re.DOTALL,
+)
+
+
+def _lift_escapes(markup: str) -> str:
+    """Replace ``\\X`` escapes with placeholders, leaving ``\\\\`` alone."""
+    return _JIRA_ESCAPE_RE.sub(
+        lambda m: f"\x00JESC{ord(m.group(1))}\x00",
+        markup.replace("\\\\", "\x00JBR\x00"),
+    ).replace("\x00JBR\x00", "\\\\")
+
+
+# Line openers that mean nothing in Jira but start a block in Markdown:
+# Jira numbers lists with "#", quotes with "bq." and bullets with "*",
+# so these are prose there and have to stay prose after conversion.
+_JIRA_PROSE_LINE_START_RE = re.compile(r"^[ \t]*(\d+[.)]|[>+])(?=\s)", re.MULTILINE)
+
+
+def _lift_markdown_line_starts(markup: str) -> str:
+    """Placeholder the Markdown-significant character opening a line."""
+
+    def _replace(match: re.Match[str]) -> str:
+        opener = match.group(1)
+        indent = match.group(0)[: -len(opener)]
+        return f"{indent}{opener[:-1]}\x00JESC{ord(opener[-1])}\x00"
+
+    return _JIRA_PROSE_LINE_START_RE.sub(_replace, markup)
+
+
+def _unescape_jira_literals(markup: str) -> str:
+    """Turn Jira's literal-text escapes into placeholders, pre-conversion.
+
+    Jira writes a literal ``*`` as ``\\*``; jira2markdown treats that
+    backslash as ordinary text and escapes it again, so each read-write
+    cycle doubles it. Two backslashes are Jira's line break, so the text
+    eventually sprouts newlines. Escapes are lifted out here and restored
+    as Markdown escapes afterwards, keeping the cycle stable.
+
+    The same placeholder carries Jira prose that would otherwise be read
+    back as a Markdown list or quote.
+
+    ``\\\\`` (line break) is left for jira2markdown to handle, and code,
+    noformat and monospace spans are skipped entirely.
+    """
+
+    def _prepare(segment: str) -> str:
+        return _lift_markdown_line_starts(_lift_escapes(segment))
+
+    out: list[str] = []
+    pos = 0
+    for match in _JIRA_VERBATIM_RE.finditer(markup):
+        out.append(_prepare(markup[pos : match.start()]))
+        out.append(match.group(0))
+        pos = match.end()
+    out.append(_prepare(markup[pos:]))
+    return "".join(out)
+
+
+def _restore_jira_literals(markdown: str) -> str:
+    """Restore placeholders from :func:`_unescape_jira_literals`."""
+    return re.sub(
+        r"\x00JESC(\d+)\x00",
+        lambda m: _markdown_literal_at(chr(int(m.group(1))), markdown, m.start()),
+        markdown,
+    )
+
+
+def _decode_prose_entities(markdown: str) -> str:
+    """Decode the numeric entities the write path emits, outside code.
+
+    Jira renders ``&#123;`` as ``{``, so an agent reading an issue should
+    see the character a person sees. Anything that would then be read as
+    Markdown is returned escaped.
+    """
+    return _NUMERIC_ENTITY_RE.sub(
+        lambda m: _markdown_literal_at(chr(int(m.group(1))), markdown, m.start()),
+        markdown,
+    )
 
 
 def _convert_panel(params: str | None, content: str) -> str:
@@ -957,19 +1130,27 @@ class JiraPreprocessor(BasePreprocessor):
         if self.disable_translation:
             return input_text
 
+        # Lift Jira's literal-text escapes out before conversion; they are
+        # restored as Markdown escapes below. Without this, every
+        # read-modify-write cycle doubles the backslash until it becomes a
+        # Jira line break.
+        markup = _unescape_jira_literals(input_text)
+
         if len(input_text) > _WIKI_PARSER_MAX_CHARS:
             logger.debug(
                 "Input exceeds %d chars; using regex wiki-markup fallback",
                 _WIKI_PARSER_MAX_CHARS,
             )
-            return _regex_jira_to_markdown(input_text).rstrip("\n")
+            return _restore_jira_literals(_regex_jira_to_markdown(markup).rstrip("\n"))
 
         try:
-            output = _convert_wiki_cached(input_text)
+            output = _convert_wiki_cached(markup)
         except Exception as e:
             logger.warning(f"Error parsing Jira markup, using regex fallback: {e}")
             try:
-                return _regex_jira_to_markdown(input_text).rstrip("\n")
+                return _restore_jira_literals(
+                    _regex_jira_to_markdown(markup).rstrip("\n")
+                )
             except Exception:
                 return input_text
 
@@ -1000,6 +1181,10 @@ class JiraPreprocessor(BasePreprocessor):
             output,
         )
         output = output.replace("</font>", "</span>")
+
+        # Only prose is touched: code spans and fences are held aside above,
+        # and entities are literal text inside them.
+        output = _decode_prose_entities(_restore_jira_literals(output))
 
         output = _restore_blocks(output, inline_codes, "J2MINLINE")
         output = _restore_blocks(output, code_blocks, "J2MCODE")
@@ -1075,6 +1260,14 @@ class JiraPreprocessor(BasePreprocessor):
             mentions,
             "JIRAMENTION",
         )
+        anchors: list[str] = []
+        output = _extract_blocks(
+            output,
+            _JIRA_ANCHOR_MACRO_RE.pattern,
+            lambda m: m.group(0),
+            anchors,
+            "JIRAANCHOR",
+        )
         jira_lists: list[str] = []
         output = _extract_blocks(
             output,
@@ -1097,4 +1290,5 @@ class JiraPreprocessor(BasePreprocessor):
         output = _repair_intraword_emphasis(output)
         output = _restore_blocks(output, jira_lists, "JIRALIST")
         output = _restore_blocks(output, mentions, "JIRAMENTION")
+        output = _restore_blocks(output, anchors, "JIRAANCHOR")
         return output

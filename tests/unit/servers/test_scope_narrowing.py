@@ -122,9 +122,7 @@ class TestRequestNarrowing:
     def test_malformed_header_is_refused(self):
         config = make_config(jql_filter="project = PROJ")
         with pytest.raises(ValueError, match=JIRA_SCOPE_NARROW_HEADER):
-            self._with_headers(
-                {JIRA_SCOPE_NARROW_HEADER: "1 = 1) OR (1 = 1"}, config
-            )
+            self._with_headers({JIRA_SCOPE_NARROW_HEADER: "1 = 1) OR (1 = 1"}, config)
 
     def test_the_shared_config_is_never_mutated(self):
         """One caller's narrowing must not leak into another's request."""

@@ -41,9 +41,9 @@ Jira DC 10.3 renderer, not from documentation.
 
 Pipeline (`markdown_to_jira`):
 
-1. **Protect Jira passthrough syntax** — `[~mentions]` and Jira-style
-   nested list lines (`** item`, `*# item`) are placeholder-extracted
-   and restored verbatim at the end.
+1. **Protect Jira passthrough syntax** — `[~mentions]`, `{anchor:name}`
+   and Jira-style nested list lines (`** item`, `*# item`) are
+   placeholder-extracted and restored verbatim at the end.
 2. **Protect pipes in code spans on table rows** — GFM splits cells on
    `|` before inline parsing; pipes inside backtick spans are
    pre-escaped as `\|` so the span stays in one cell.
@@ -54,8 +54,9 @@ Pipeline (`markdown_to_jira`):
    and render with a customized `JiraRenderer` (all rules below).
 5. **Repair intraword emphasis** — CommonMark parses `2*3*4` as
    emphasis, which Jira cannot render intraword; the author's literal
-   characters are restored (as entities). Code blocks, monospace,
-   links, images, and URLs are shielded from this repair.
+   characters are restored as backslash escapes (`2\*3\*4`). Code
+   blocks, monospace, links, images, and URLs are shielded from this
+   repair.
 
 On any parser error the original Markdown is returned unchanged —
 conversion never destroys content.
@@ -78,14 +79,14 @@ conversion never destroys content.
 | Soft break | kept as newline (Jira preserves single newlines) |
 | Inline HTML `<sup>` `<sub>` `<ins>`/`<u>` `<del>`/`<s>` `<cite>`/`<q>` `<b>` `<i>` | `^x^` `~x~` `+x+` `-x-` `??x??` `*x*` `_x_` |
 | `<span style="color:red">` / `<font color=…>` | `{color:red}…{color}` |
-| `[~user]`, `[~accountid:…]`, `** nested` Jira lists | passed through verbatim |
+| `[~user]`, `[~accountid:…]`, `{anchor:name}`, `** nested` Jira lists | passed through verbatim |
 
 ### Escaping rules (renderer-verified)
 
 | Context | Characters | Mechanism |
 |---|---|---|
 | Prose `{` `}` | always | HTML entity (backslash provably fails on doubled braces; spaced `{ x }` splits the paragraph) |
-| Prose `*` `_` | when touching non-whitespace | backslash (older Jira applies emphasis intraword — snake_case italics; escapes render clean) |
+| Prose `*` `_` | when touching non-whitespace | backslash (older Jira applies emphasis intraword — snake_case italics; escapes render clean, and the read path can invert them) |
 | Prose `-` `+` `^` `~` | only at word-boundary positions | backslash — `well-known`, `2024-01-15`, `C++`, `x^2` stay readable |
 | Prose `[` `]` | when touching non-whitespace | backslash |
 | Emoticons `:)` `:(` `;)` `:P` `:D` (also lowercase `:p` `:d`) `(y)` `(n)` `(i)` `(/)` `(x)` `(!)` `(?)` `(+)` `(-)` `(*)` `(*r)` `(*g)` `(*b)` `(*y)` `(on)` `(off)` `(flag)` `(flagoff)` | exact tokens | first character becomes an entity — displays identically (`f(x)` stays `f(x)`), Jira's icon substitution is stopped |
@@ -110,15 +111,68 @@ conversion never destroys content.
 ## Read path: wiki markup → Markdown
 
 `jira_to_markdown` uses [jira2markdown](https://github.com/catcombo/jira2markdown)
-(a pyparsing grammar) with three custom elements: `{code}` without the
-library's "Java" default language, and fence/backtick delimiters sized
-past any backtick run in the content so round trips stay parseable;
-`{{...}}` decodes HTML entities so the write path's encoding round-trips
-to the original characters. Results are memoized (LRU), and inputs over
-20k characters or parse failures fall back to a fast regex pipeline.
-`clean_jira_text` additionally resolves mentions and smart links and
-shields Markdown links, autolinks, and inline formatting tags from the
-HTML cleanup pass.
+(a pyparsing grammar) with custom elements, then a small amount of
+pre- and post-processing that exists so the cycle in
+[Round-trip stability](#round-trip-stability) holds.
+
+Custom grammar elements:
+
+- **`{code}` / `{noformat}`** — no "Java" default language, and fence
+  delimiters sized past any backtick run in the content.
+- **`{{monospace}}`** — decodes HTML entities (the write path's
+  encoding) and sizes the backtick delimiters the same way.
+- **`[~user]`** — kept as the wiki mention. jira2markdown renders
+  `@user`, which the write path cannot turn back into a mention, so an
+  agent's edit would silently unlink the person.
+- **`!url|alt=text!`** — keeps the alt text. jira2markdown drops every
+  attribute but `width`/`height` and uses the URL as the alt.
+
+Pre-processing (skipped inside `{code}`, `{noformat}` and `{{...}}`,
+where a backslash is literal):
+
+- **Lift `\X` escapes** to placeholders. jira2markdown reads that
+  backslash as ordinary text and escapes it again, so a literal `*`
+  gained one backslash per edit cycle until `\\` — Jira's line break —
+  injected a newline.
+- **Lift Markdown block openers Jira reads as prose**: `1.`, `1)`, `>`
+  and `+` at the start of a line. Jira numbers lists with `#`, quotes
+  with `bq.` and bullets with `*`, so those lines are plain text there
+  and must not come back as Markdown blocks.
+
+Post-processing (outside code spans and fences):
+
+- **Restore the lifted characters** as Markdown escapes, chosen by
+  position: `\*` mid-sentence, `\+` opening a line, `1\.` after a
+  leading number.
+- **Decode the write path's numeric entities** the same way, so a
+  reader sees the character Jira displays.
+
+Results are memoized (LRU), and inputs over 20k characters or parse
+failures fall back to a fast regex pipeline. `clean_jira_text`
+additionally resolves mentions and smart links and shields Markdown
+links, autolinks, and inline formatting tags from the HTML cleanup pass.
+
+### Round-trip stability
+
+Conversion is lossy in one direction — Jira has no Markdown — so the
+guarantee is **stability**, not identity:
+
+> After the first write, `markdown_to_jira(jira_to_markdown(markup))`
+> must equal `markup`, byte for byte, forever.
+
+That is what makes read-modify-write safe. An agent reads an issue,
+edits one line, and writes it back; without stability the untouched
+parts of the description drift a little on every edit. It is enforced by
+`TestRoundTripStability` (a 50+ case corpus, unit) and
+`test_round_trip_renders_identically` (the same cycle plus a live
+renderer diff of the visible text, e2e).
+
+Known first-cycle losses — stable afterwards, but not reversible:
+
+- `{panel:title=T}body{panel}` becomes a blockquote with a bold title.
+- `[Display Name|~user]` keeps the mention, drops the display name.
+- Jira's Confluence-lookalike macros (`{note}`, `{info}`, `{tip}`,
+  `{toc}`, …) are literal text in Jira, and are escaped as such.
 
 ## Validation
 
@@ -134,7 +188,9 @@ Three layers, run in CI order of cost:
 3. **Real-renderer oracle** — `tests/e2e/test_markup_rendering_dc.py`
    renders 100+ converted cases through a live Jira DC wiki renderer
    and asserts on **browser-visible text** (entity decoding included)
-   plus HTML structure and generic invariants.
+   plus HTML structure and generic invariants. It also runs each
+   round-trip case through a full edit cycle and asserts the rendered
+   text is unchanged.
 
 Run the renderer suite against the dockerized Jira DC:
 

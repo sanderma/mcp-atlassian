@@ -12,6 +12,7 @@ build for any that does not, so a new tool cannot silently skip the check.
 
 import inspect
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any, TypeVar
@@ -21,6 +22,7 @@ from fastmcp.exceptions import ToolError
 
 from mcp_atlassian.jira.scope import (
     Access,
+    allowed_project_keys,
     assert_issues_in_scope,
     scope_is_configured,
 )
@@ -28,6 +30,15 @@ from mcp_atlassian.jira.scope import (
 from .dependencies import get_jira_fetcher
 
 logger = logging.getLogger(__name__)
+
+# Environment variables that configure a boundary. Consulted when the
+# lifespan config is unavailable, so an unreadable context can never be
+# mistaken for "no boundary configured".
+_BOUNDARY_ENV_VARS = (
+    "JIRA_JQL_FILTER",
+    "JIRA_WRITE_JQL_FILTER",
+    "JIRA_PROJECTS_FILTER",
+)
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
@@ -48,6 +59,20 @@ def _lifespan_jira_config(ctx: Context) -> Any | None:
         else None
     )
     return getattr(app_ctx, "full_jira_config", None)
+
+
+def _scope_may_apply(ctx: Context) -> bool:
+    """Whether a boundary might apply, so the client must be consulted.
+
+    Skipping the check requires positive evidence that no boundary exists.
+    The lifespan config provides that when it is readable; when it is not,
+    the environment the operator configures is consulted instead, so an
+    absent or unreadable context can never silently disable the boundary.
+    """
+    config = _lifespan_jira_config(ctx)
+    if config is not None:
+        return scope_is_configured(config)
+    return any(os.getenv(name, "").strip() for name in _BOUNDARY_ENV_VARS)
 
 
 def _collect_keys(value: Any) -> list[str]:
@@ -91,20 +116,62 @@ def enforce_issue_scope(*params: str, access: Access = "read") -> Callable[[F], 
             for param in params:
                 keys.extend(_collect_keys(bound.arguments.get(param)))
 
-            # Resolving the fetcher is only worth it when a boundary is
-            # actually configured; with none set this decorator is inert.
-            if keys and scope_is_configured(_lifespan_jira_config(ctx)):
+            if keys and _scope_may_apply(ctx):
+                # The fetcher's own config is authoritative (it reflects any
+                # per-request configuration); the lifespan snapshot above is
+                # only used to skip this work when it definitively says no
+                # boundary exists.
                 fetcher = await get_jira_fetcher(ctx)
-                try:
-                    assert_issues_in_scope(fetcher, keys, access, action)
-                except ValueError as exc:
-                    # Surface the boundary to the caller instead of letting
-                    # FastMCP mask it as a generic tool failure.
-                    raise ToolError(str(exc)) from exc
+                if scope_is_configured(fetcher.config):
+                    try:
+                        assert_issues_in_scope(fetcher, keys, access, action)
+                    except ValueError as exc:
+                        # Surface the boundary to the caller instead of
+                        # letting FastMCP mask it as a generic failure.
+                        raise ToolError(str(exc)) from exc
 
             return await func(ctx, *args, **kwargs)
 
         setattr(wrapper, SCOPE_MARKER, {"params": params, "access": access})
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
+
+
+def enforce_project_scope(param: str) -> Callable[[F], F]:
+    """Check a destination project against ``JIRA_PROJECTS_FILTER``.
+
+    Moving or creating an issue names a project rather than an issue, so
+    the issue-key check does not apply. Without this, an in-scope issue
+    could be moved *out* of the allowlist and become unreachable.
+
+    Args:
+        param: Name of the tool parameter holding the project key.
+    """
+
+    def decorator(func: F) -> F:
+        signature = inspect.signature(func)
+        action = func.__name__.replace("_", " ")
+
+        @wraps(func)
+        async def wrapper(ctx: Context, *args: Any, **kwargs: Any) -> Any:
+            bound = signature.bind_partial(ctx, *args, **kwargs)
+            project = bound.arguments.get(param)
+
+            if project and _scope_may_apply(ctx):
+                fetcher = await get_jira_fetcher(ctx)
+                allowed = allowed_project_keys(fetcher.config)
+                if allowed and str(project).strip().upper() not in allowed:
+                    raise ToolError(
+                        f"Cannot {action}: project {project} is outside the "
+                        "projects this server is configured to use "
+                        "(JIRA_PROJECTS_FILTER). This is a fixed boundary in "
+                        "this server's configuration; retrying will not help."
+                    )
+
+            return await func(ctx, *args, **kwargs)
+
+        setattr(wrapper, SCOPE_MARKER, {"params": (param,), "access": "write"})
         return wrapper  # type: ignore[return-value]
 
     return decorator
@@ -134,8 +201,10 @@ def enforce_link_scope(
             bound = signature.bind_partial(ctx, *args, **kwargs)
             link_id = bound.arguments.get(param)
 
-            if link_id and scope_is_configured(_lifespan_jira_config(ctx)):
+            if link_id and _scope_may_apply(ctx):
                 fetcher = await get_jira_fetcher(ctx)
+                if not scope_is_configured(fetcher.config):
+                    return await func(ctx, *args, **kwargs)
                 try:
                     keys = fetcher.issue_keys_for_link(str(link_id))
                 except Exception as exc:  # noqa: BLE001 - fail closed
@@ -149,6 +218,15 @@ def enforce_link_scope(
                         "resolved, so its issues cannot be checked against the "
                         "configured scope."
                     ) from exc
+                if len(keys) < 2:
+                    # Jira omits an endpoint the credentials cannot see.
+                    # Checking only the visible side would let a link be
+                    # removed from an issue that is out of scope.
+                    raise ToolError(
+                        f"Cannot {action}: issue link {link_id} does not "
+                        "expose both of its issues to these credentials, so "
+                        "it cannot be checked against the configured scope."
+                    )
                 try:
                     assert_issues_in_scope(fetcher, keys, access, action)
                 except ValueError as exc:

@@ -88,7 +88,7 @@ conversion never destroys content.
 | Prose `*` `_` | when touching non-whitespace | backslash (older Jira applies emphasis intraword — snake_case italics; escapes render clean) |
 | Prose `-` `+` `^` `~` | only at word-boundary positions | backslash — `well-known`, `2024-01-15`, `C++`, `x^2` stay readable |
 | Prose `[` `]` | when touching non-whitespace | backslash |
-| Emoticons `:)` `:(` `;)` `:P` `:D` `(y)` `(n)` `(i)` `(/)` `(x)` `(!)` `(?)` `(+)` `(-)` `(*)` `(on)` `(off)` `(flag)` | exact tokens | first character becomes an entity — displays identically (`f(x)` stays `f(x)`), Jira's icon substitution is stopped |
+| Emoticons `:)` `:(` `;)` `:P` `:D` (also lowercase `:p` `:d`) `(y)` `(n)` `(i)` `(/)` `(x)` `(!)` `(?)` `(+)` `(-)` `(*)` `(*r)` `(*g)` `(*b)` `(*y)` `(on)` `(off)` `(flag)` `(flagoff)` | exact tokens | first character becomes an entity — displays identically (`f(x)` stays `f(x)`), Jira's icon substitution is stopped |
 | Line-start tokens in paragraphs: `h1.`–`h6.`, `bq.`, `\|`, `--` runs | first line and soft-broken continuation lines | entity on the recognizing character (`h2&#46;`) |
 | Inline code content | **everything**: `&` `{}` `[]` `*` `_` `-` `+` `^` `~` `\|` `!` `?` | HTML entities — the only representation Jira passes through verbatim inside `{{...}}`; `&` first so pre-existing entity-like text stays literal |
 | Bare URLs | none (escapes break Jira's autolinking); `{` `}` → `%7B`/`%7D` (Jira macro-parses braces even inside URLs) | percent-encoding |

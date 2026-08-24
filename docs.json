@@ -3,7 +3,7 @@
   "theme": "mint",
   "name": "MCP Atlassian",
   "metadata": {
-    "og:description": "MCP server for Atlassian Jira and Confluence — all 98 tools enabled by default"
+    "og:description": "MCP server for Atlassian Jira and Confluence — all 99 tools enabled by default"
   },
   "seo": {
     "indexHiddenPages": false
@@ -97,6 +97,7 @@
             "pages": [
               "docs/http-transport",
               "docs/compatibility",
+              "docs/advanced/jira-scope",
               "docs/advanced/sla-metrics",
               "docs/advanced/docker-production",
               "docs/advanced/markdown-to-jira"
@@ -105,7 +106,8 @@
           {
             "group": "Help",
             "pages": [
-              "docs/troubleshooting"
+              "docs/troubleshooting",
+              "docs/migration-v1"
             ]
           }
         ]

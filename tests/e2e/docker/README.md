@@ -32,9 +32,10 @@ bash create-pat.sh
 ## Jira-only quick start (automated, no browser)
 
 The Markdown-to-wiki-markup rendering tests
-(`tests/e2e/test_markup_rendering_dc.py`) need only Jira. The setup
-wizard can be completed entirely over HTTP, including fetching the free
-timebomb license:
+(`tests/e2e/test_markup_rendering_dc.py`) and the read/write scope tests
+(`tests/e2e/test_scope_dc.py`) need only Jira. The setup wizard can be
+completed entirely over HTTP, including fetching the free timebomb
+license:
 
 ```bash
 cp .env.example .env
@@ -44,7 +45,11 @@ bash setup-test-data.sh       # creates the E2E project
 
 cd ../../..
 uv run pytest tests/e2e/test_markup_rendering_dc.py --dc-e2e -v
+uv run pytest tests/e2e/test_scope_dc.py --dc-e2e -v
 ```
+
+`test_scope_dc.py` creates and deletes its own issues in the `E2E`
+project, so `setup-test-data.sh` must have run first.
 
 `setup-jira-wizard.sh` calls `get-jira-license.sh`, which downloads the
 public **Jira Software Data Center timebomb license** (10 users, valid

@@ -1,4 +1,7 @@
-# Migrating to v1 outcome-oriented tools
+---
+title: "Migrating to v1 Tools"
+description: "Map deprecated tools to their outcome-oriented replacements and enable the legacy toolset during migration"
+---
 
 See [#1104](https://github.com/sooperset/mcp-atlassian/issues/1104) for the
 direction of the v1 tool restructuring.

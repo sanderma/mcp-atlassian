@@ -109,3 +109,11 @@ Use relative dates (`"-7d"`, `"-1w"`, `"-1M"`) instead of absolute dates for reu
 <Warning>
 Some JQL functions like `issueHistory()` are Cloud-only. Check your Jira version's documentation for supported functions.
 </Warning>
+
+<Note>
+If the server is configured with a
+[read boundary](/docs/advanced/jira-scope) (`JIRA_JQL_FILTER` or
+`JIRA_PROJECTS_FILTER`), it is ANDed into every query you send. Results are
+always a subset of that boundary — an `OR` in your query cannot widen it — so a
+query that returns nothing may simply fall outside it.
+</Note>

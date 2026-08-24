@@ -28,7 +28,12 @@ ISSUE_KEY_PARAMS = {
 
 # Tools that take an issue-key parameter but cannot be scope-checked on it,
 # each with the reason. Keep this list short and justified.
-EXEMPT: dict[str, str] = {}
+EXEMPT: dict[str, str] = {
+    # Reports the scope verdict for keys instead of acting on the issues:
+    # it returns only writable/read-only/denied, never issue content, and
+    # applies the boundary itself via classify_issue_keys.
+    "get_scope": "diagnostic tool; classifies keys rather than accessing them",
+}
 
 
 def _unwrap_params(func) -> set[str]:
@@ -96,8 +101,8 @@ async def test_write_tools_require_write_scope():
         if marker is None or marker.get("access") != "write":
             wrong.append(short_name)
 
-    assert not wrong, (
-        "Write tools not enforcing the write scope: " + ", ".join(sorted(wrong))
+    assert not wrong, "Write tools not enforcing the write scope: " + ", ".join(
+        sorted(wrong)
     )
 
 

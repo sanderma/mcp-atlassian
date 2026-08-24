@@ -15,7 +15,7 @@ Search Jira issues using JQL (Jira Query Language).
 | `fields` | `string` | No | (Optional) Comma-separated fields to return in the results. Use '*all' for all fields, or specify individual fields like 'summary,status,assignee,priority' |
 | `limit` | `integer` | No | Maximum number of results (1-50) |
 | `start_at` | `integer` | No | Starting index for pagination (0-based) |
-| `projects_filter` | `string` | No | (Optional) Comma-separated list of project keys to filter results by. Overrides the environment variable JIRA_PROJECTS_FILTER if provided. |
+| `projects_filter` | `string` | No | (Optional) Comma-separated list of project keys to filter results by. Narrows within the server's configured JIRA_PROJECTS_FILTER; it cannot widen it or reach projects the server excludes. |
 | `expand` | `string` | No | (Optional) fields to expand. Examples: 'renderedFields', 'transitions', 'changelog' |
 | `page_token` | `string` | No | (Optional) Pagination token from a previous search result. Cloud only — Server/DC uses start_at for pagination. |
 | `use_display_names` | `boolean` | No | When true, custom field keys in the output use human-readable display names (e.g. 'Story Points') instead of opaque IDs (e.g. 'customfield_10243'). The 'names' expansion is added automatically. Standard fields are unaffected. |

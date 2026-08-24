@@ -131,6 +131,24 @@ async def _run_stdio_with_stdin_guard(run_kwargs: dict[str, object]) -> None:
     help="Run OAuth 2.0 setup wizard for Atlassian Cloud",
 )
 @click.option(
+    "--jira-scope-check",
+    is_flag=True,
+    help=(
+        "Preflight the Jira read/write scope and exit: show the effective "
+        "query, how many issues each boundary allows, and a sample of what "
+        "the agent would see. Combine with --jira-jql-filter / "
+        "--jira-write-jql-filter to try a configuration before deploying it."
+    ),
+)
+@click.option(
+    "--jira-scope-check-issues",
+    metavar="KEYS",
+    help=(
+        "Comma-separated issue keys to classify during --jira-scope-check, "
+        "e.g. PROJ-1,PROJ-2. Each is reported writable, read-only or denied."
+    ),
+)
+@click.option(
     "--transport",
     type=click.Choice(["stdio", "sse", "streamable-http"]),
     default="stdio",
@@ -205,8 +223,8 @@ async def _run_stdio_with_stdin_guard(run_kwargs: dict[str, object]) -> None:
     "--jira-write-jql-filter",
     help=(
         "JQL an issue must match before a write tool may modify it "
-        "(write boundary), e.g. 'team = ours'. Readable issues that do not "
-        "match are read-only."
+        "(write boundary), e.g. 'labels = agent-writable'. Readable issues "
+        "that do not match are read-only."
     ),
 )
 @click.option(
@@ -251,6 +269,8 @@ def main(
     verbose: int,
     env_file: str | None,
     oauth_setup: bool,
+    jira_scope_check: bool,
+    jira_scope_check_issues: str | None,
     transport: str,
     stateless: bool,
     port: int,
@@ -434,6 +454,13 @@ def main(
         os.environ["JIRA_JQL_FILTER"] = jira_jql_filter
     if click_ctx and was_option_provided(click_ctx, "jira_write_jql_filter"):
         os.environ["JIRA_WRITE_JQL_FILTER"] = jira_write_jql_filter
+
+    if jira_scope_check or jira_scope_check_issues:
+        from .utils.scope_check import run_scope_check
+
+        raw_keys = jira_scope_check_issues or ""
+        keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        sys.exit(run_scope_check(keys))
 
     from mcp_atlassian.servers import main_mcp
 

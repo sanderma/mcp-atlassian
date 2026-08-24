@@ -9,6 +9,11 @@ from ..models.jira import (
     JiraServiceDeskQueuesResult,
 )
 from .client import JiraClient
+from .scope import (
+    ScopeEvaluationError,
+    issues_outside_scope,
+    scope_is_configured,
+)
 
 logger = logging.getLogger("mcp-jira")
 
@@ -135,6 +140,54 @@ class QueuesMixin(JiraClient):
             )
             return JiraServiceDeskQueuesResult(service_desk_id=service_desk_id)
 
+    def _apply_scope_to_queue_response(self, response: dict) -> dict:
+        """Drop issues outside the configured read boundary.
+
+        The JSM queue endpoint accepts no JQL, so the boundary cannot be
+        pushed into the request; it is applied to the response instead.
+        Fails closed — an issue that cannot be confirmed in scope is
+        removed.
+        """
+        if not scope_is_configured(self.config):
+            return response
+
+        raw = response.get("values")
+        if not isinstance(raw, list):
+            return response
+
+        keys = [
+            issue.get("key")
+            for issue in raw
+            if isinstance(issue, dict) and issue.get("key")
+        ]
+        if not keys:
+            return response
+
+        try:
+            blocked = set(issues_outside_scope(self, keys, "read"))
+        except ScopeEvaluationError:
+            logger.warning(
+                "Queue issues: scope could not be evaluated; returning none."
+            )
+            blocked = set(keys)
+        if not blocked:
+            return response
+
+        kept = [
+            issue
+            for issue in raw
+            if not (isinstance(issue, dict) and issue.get("key") in blocked)
+        ]
+        logger.info(
+            "Queue issues: %d of %d issues withheld by the read boundary",
+            len(raw) - len(kept),
+            len(raw),
+        )
+        filtered = dict(response)
+        filtered["values"] = kept
+        filtered["size"] = len(kept)
+        return filtered
+
     def get_queue_issues(
         self,
         service_desk_id: str,
@@ -197,6 +250,11 @@ class QueuesMixin(JiraClient):
                     queue_id=queue_id,
                     queue=queue_model,
                 )
+
+            # The JSM queue endpoint takes no JQL, so the configured read
+            # boundary cannot be pushed into the query — drop out-of-scope
+            # issues from the response instead.
+            response = self._apply_scope_to_queue_response(response)
 
             return JiraQueueIssuesResult.from_api_response(
                 response,

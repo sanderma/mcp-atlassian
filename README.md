@@ -91,6 +91,7 @@ Documentation is also available in [llms.txt format](https://llmstxt.org/), whic
 | [Installation](https://mcp-atlassian.soomiles.com/docs/installation) | uvx, Docker, pip, from source |
 | [Authentication](https://mcp-atlassian.soomiles.com/docs/authentication) | API tokens, PAT, OAuth 2.0 |
 | [Configuration](https://mcp-atlassian.soomiles.com/docs/configuration) | IDE setup, environment variables |
+| [Jira Read/Write Scope](https://mcp-atlassian.soomiles.com/docs/advanced/jira-scope) | Limit what an agent can see and change with JQL |
 | [HTTP Transport](https://mcp-atlassian.soomiles.com/docs/http-transport) | SSE, streamable-http, multi-user |
 | [Tools Reference](https://mcp-atlassian.soomiles.com/docs/tools-reference) | All Jira & Confluence tools |
 | [Troubleshooting](https://mcp-atlassian.soomiles.com/docs/troubleshooting) | Common issues & debugging |
@@ -114,11 +115,29 @@ Documentation is also available in [llms.txt format](https://llmstxt.org/), whic
 | `jira_update_issue` - Update issues | `confluence_update_page` - Update pages |
 | `jira_transition_issue` - Change status | `confluence_add_comment` - Add comments |
 
-**98 tools total** — See [Tools Reference](https://mcp-atlassian.soomiles.com/docs/tools-reference) for the complete list.
+**99 tools total** — See [Tools Reference](https://mcp-atlassian.soomiles.com/docs/tools-reference) for the complete list.
 
 ## Security
 
 Never share API tokens. Keep `.env` files secure. See [SECURITY.md](SECURITY.md).
+
+### Limiting what an agent can touch
+
+Two JQL filters bound the agent per issue, so it can run with the least access
+it needs — `JIRA_JQL_FILTER` decides what is visible at all, and
+`JIRA_WRITE_JQL_FILTER` decides which of those issues may be changed:
+
+```bash
+JIRA_JQL_FILTER=project = PROJ
+JIRA_WRITE_JQL_FILTER=labels = automation
+
+# Preflight the result before handing the configuration to an agent
+uvx mcp-atlassian --jira-scope-check PROJ-1,PROJ-2
+```
+
+See [Jira Read/Write Scope](https://mcp-atlassian.soomiles.com/docs/advanced/jira-scope)
+for the full semantics. `READ_ONLY_MODE=true` remains available to disable all
+write tools at once.
 
 ## Contributing
 

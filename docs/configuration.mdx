@@ -173,8 +173,8 @@ openssl rsa -in encrypted.key -out decrypted.key
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `JIRA_PROJECTS_FILTER` | Limit to specific Jira projects | `PROJ,DEV,SUPPORT` |
-| `JIRA_JQL_FILTER` | Limit what Jira issues are visible at all (see [Jira Read/Write Scope](#jira-read-write-scope)) | `project = PROJ AND labels = agent` |
-| `JIRA_WRITE_JQL_FILTER` | Limit which visible Jira issues may be modified | `team = ours` |
+| `JIRA_JQL_FILTER` | Limit what Jira issues are visible at all (see [Jira Read/Write Scope](#jira-read-write-scope)) | `project = PROJ AND labels = agent-visible` |
+| `JIRA_WRITE_JQL_FILTER` | Limit which visible Jira issues may be modified | `labels = automation` |
 | `CONFLUENCE_SPACES_FILTER` | Limit to specific Confluence spaces | `DEV,TEAM,DOC` |
 | `ENABLED_TOOLS` | Enable only specific tools | `confluence_search,jira_get_issue` |
 | `TOOLSETS` | Enable tool groups (see [Toolset Filtering](#toolset-filtering)) | `default`, `legacy`, `all`, `default,jira_agile` |
@@ -189,44 +189,45 @@ issue instead — the agent reads broadly but only changes what you allow:
 | `JIRA_JQL_FILTER` | Read | ANDed into every JQL query the server issues, and required of any issue addressed directly by key. Issues that do not match are invisible. |
 | `JIRA_WRITE_JQL_FILTER` | Write | Applied **within** the read boundary. A write tool refuses to touch an issue that does not match, so everything readable but unmatched is read-only. |
 
-Read the whole instance, write only your own team's issues:
+Read the whole instance, change only the issues labelled for the agent:
 
 ```bash
-JIRA_WRITE_JQL_FILTER=team = ours
+JIRA_WRITE_JQL_FILTER=labels = agent-writable
 ```
 
-Restrict visibility too — see one project, write only your team's issues in it:
+Restrict visibility too — see one project, change only its automation issues:
 
 ```bash
 JIRA_JQL_FILTER=project = PROJ
-JIRA_WRITE_JQL_FILTER=project = PROJ AND team = ours
+JIRA_WRITE_JQL_FILTER=project = PROJ AND labels = automation
 ```
 
 Both are also available as `--jira-jql-filter` / `--jira-write-jql-filter`.
+Preflight a configuration before handing it to an agent — this reports what each
+boundary allows and exits non-zero if Jira rejects a filter:
 
-**Semantics**
+```bash
+uvx mcp-atlassian --jira-scope-check PROJ-1,PROJ-2
+```
+
+Key points:
 
 - **Configuration-only.** No tool argument can widen a boundary; a caller may
   only narrow further, as with `JIRA_PROJECTS_FILTER`.
 - **Fail-closed.** An issue that does not come back from the scope query — it
   does not match, does not exist, or is invisible to the credentials — is
   refused. A failed scope lookup denies rather than allows.
-- **Composable.** `JIRA_PROJECTS_FILTER` still applies and is checked first,
-  without an API call (project prefixes are compared locally).
-- **Cost.** When a JQL boundary is set, a tool addressing issues by key runs
-  one extra JQL search to validate them (batched for multi-issue calls). With
-  no boundary configured the check is skipped entirely.
-
-**What it does not cover**
-
-Issue *creation* has no existing issue to match, so `JIRA_WRITE_JQL_FILTER`
-cannot constrain it — bound creation with `JIRA_PROJECTS_FILTER` /
-`JIRA_JQL_FILTER` (which do apply at project level), or disable the create
-tools via `ENABLED_TOOLS` / `TOOLSETS`. Boundaries apply to Jira issues; they
-do not filter Confluence, sprint/board/version metadata, or user lookups.
+- **Not a creation limit.** No boundary constrains `jira_create_issue` or
+  `jira_batch_create_issues`; drop those tools with `ENABLED_TOOLS` / `TOOLSETS`
+  instead.
+- **Jira issues only.** Confluence, board/sprint/version metadata and user
+  lookups are unaffected.
 
 These are server-side guardrails against agent mistakes, layered on top of —
 not a replacement for — Jira permissions on the account the server uses.
+
+See [Jira Read/Write Scope](/docs/advanced/jira-scope) for the full semantics,
+enforcement details, and how to hand a narrower configuration to a subagent.
 
 ### Jira Key Validation
 
@@ -371,7 +372,7 @@ Toolsets provide group-level tool control. Instead of listing individual tool na
 enable entire groups of related tools at once using the `TOOLSETS` environment variable.
 
 ```bash
-# Restrict to core tools only (~35 tools across 6 core toolsets)
+# Restrict to core tools only (~36 tools across 6 core toolsets)
 TOOLSETS=default
 
 # Core tools plus agile boards/sprints

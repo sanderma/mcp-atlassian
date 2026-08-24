@@ -20,7 +20,11 @@ from mcp_atlassian.servers.async_utils import run_jira_fetcher_call
 from mcp_atlassian.servers.dependencies import get_jira_fetcher
 from mcp_atlassian.servers.error_handling import ErrorPreservingFastMCP
 from mcp_atlassian.servers.helpers import resolve_transition
-from mcp_atlassian.servers.scope import enforce_issue_scope, enforce_link_scope
+from mcp_atlassian.servers.scope import (
+    enforce_issue_scope,
+    enforce_link_scope,
+    enforce_project_scope,
+)
 from mcp_atlassian.utils.decorators import check_write_access
 from mcp_atlassian.utils.env import get_regex_env
 from mcp_atlassian.utils.media import (
@@ -64,7 +68,14 @@ jira_mcp = ErrorPreservingFastMCP(
         "to use inside Markdown: user mentions like [~username] and issue "
         "keys like PROJ-123.\n\n"
         "Rich-text fields returned by read tools (descriptions, comments) "
-        "have already been converted from Jira's format to Markdown."
+        "have already been converted from Jira's format to Markdown.\n\n"
+        "Scope: this server may be configured to expose only part of Jira, "
+        "and to allow writes on a narrower set than it allows reads — an "
+        "issue you can read may still be read-only. Boundaries are enforced "
+        "server-side, so a refused call will not succeed on retry: report "
+        "the limit rather than working around it. Call jira_get_scope to see "
+        "what is readable and writable (and for the settings needed to give "
+        "a subagent a narrower scope)."
     ),
 )
 
@@ -270,6 +281,120 @@ def _parse_attachments(
     if not all(isinstance(item, dict) for item in parsed):
         raise ValueError("attachments must be a JSON array of attachment objects.")
     return parsed
+
+
+@jira_mcp.tool(
+    tags={"jira", "read", "toolset:jira_issues"},
+    annotations={"title": "Get Scope", "readOnlyHint": True},
+)
+async def get_scope(
+    ctx: Context,
+    issue_keys: Annotated[
+        str | None,
+        Field(
+            description=(
+                "(Optional) Comma-separated issue keys to classify, e.g. "
+                "'PROJ-1,PROJ-2'. Each is reported as writable, read-only "
+                "or denied — use this to check before attempting a change."
+            ),
+            default=None,
+        ),
+    ] = None,
+) -> str:
+    """Report which Jira issues this server may read and write.
+
+    Call this before planning work that changes issues, and whenever a
+    tool reports that an issue is out of scope. It also gives the exact
+    settings needed to hand a *narrower* configuration to a subagent.
+
+    Args:
+        ctx: The FastMCP context.
+        issue_keys: Optional comma-separated issue keys to classify.
+
+    Returns:
+        JSON with the effective boundaries, what they mean, and how to
+        narrow them further.
+    """
+    jira = await get_jira_fetcher(ctx)
+    config = jira.config
+
+    lifespan_ctx = ctx.request_context.lifespan_context
+    app_ctx = (
+        lifespan_ctx.get("app_lifespan_context")
+        if isinstance(lifespan_ctx, dict)
+        else None
+    )
+    read_only = bool(getattr(app_ctx, "read_only", False))
+
+    projects_filter = getattr(config, "projects_filter", None)
+    jql_filter = getattr(config, "jql_filter", None)
+    write_jql_filter = getattr(config, "write_jql_filter", None)
+
+    if read_only:
+        writes = "none — the server runs in read-only mode"
+    elif write_jql_filter:
+        writes = f"only issues matching: {write_jql_filter}"
+    else:
+        writes = "any issue you can read"
+
+    readable = []
+    if projects_filter:
+        readable.append(f"projects: {projects_filter}")
+    if jql_filter:
+        readable.append(f"matching: {jql_filter}")
+
+    result = {
+        "readable": (
+            "; ".join(readable)
+            if readable
+            else "any issue the configured account can see"
+        ),
+        "writable": writes,
+        "read_only_mode": read_only,
+        "boundaries": {
+            "JIRA_PROJECTS_FILTER": projects_filter,
+            "JIRA_JQL_FILTER": jql_filter,
+            "JIRA_WRITE_JQL_FILTER": write_jql_filter,
+        },
+        "notes": [
+            "Boundaries are enforced server-side: a tool call naming an "
+            "out-of-scope issue is refused, and searches never return one. "
+            "Retrying will not help — report the limit instead.",
+            "An issue you can read but not write is read-only by design; "
+            "propose the change to a human rather than forcing it.",
+            "JIRA_WRITE_JQL_FILTER constrains changes to EXISTING issues; "
+            "it cannot constrain issue creation.",
+        ],
+        "delegating_to_a_subagent": {
+            "how": (
+                "Start another instance of this server with these "
+                "environment variables to give a subagent a narrower scope. "
+                "A subagent's server is a separate process with its own "
+                "environment and inherits NOTHING from this one: a wider "
+                "value really is wider. To restrict rather than widen, AND "
+                "your own boundaries (above) into the child's values."
+            ),
+            "example": {
+                "JIRA_JQL_FILTER": "project = PROJ AND labels = automation",
+                "JIRA_WRITE_JQL_FILTER": "project = PROJ AND assignee = currentUser()",
+                "READ_ONLY_MODE": "true (for a review-only subagent)",
+            },
+            "verify_before_use": (
+                "An operator can preflight a configuration before use with: "
+                "mcp-atlassian --jira-scope-check "
+                "--jira-scope-check-issues PROJ-1,PROJ-2"
+            ),
+        },
+    }
+
+    if issue_keys:
+        from mcp_atlassian.jira.scope import classify_issue_keys
+
+        keys = [key.strip() for key in issue_keys.split(",") if key.strip()]
+        if keys:
+            result["issues"] = classify_issue_keys(jira, keys)
+
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 
 @jira_mcp.tool(
@@ -809,7 +934,8 @@ async def search(
         Field(
             description=(
                 "(Optional) Comma-separated list of project keys to filter results by. "
-                "Overrides the environment variable JIRA_PROJECTS_FILTER if provided."
+                "Narrows within the server's configured JIRA_PROJECTS_FILTER; "
+                "it cannot widen it or reach projects the server excludes."
             ),
             default=None,
         ),
@@ -2421,6 +2547,7 @@ async def delete_issue(
 )
 @check_write_access
 @enforce_issue_scope("issue_key", access="write")
+@enforce_project_scope("target_project_key")
 async def move_issue(
     ctx: Context,
     issue_key: Annotated[

@@ -12,9 +12,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from mcp_atlassian.jira.scope import (
+    ScopeEvaluationError,
     and_jql_clause,
     apply_jql_filter,
     assert_issues_in_scope,
+    classify_issue_keys,
     issues_outside_scope,
     keys_outside_projects_filter,
     scope_is_configured,
@@ -37,16 +39,34 @@ class FakeFetcher:
         self.queries: list[str] = []
         self.raises: Exception | None = None
         self.truncate = False
+        # Keys matching the write clause; defaults to everything in scope.
+        self.write_scope: set[str] | None = None
+        self.fail_batches_larger_than: int | None = None
+        # Keys whose presence in a query makes Jira reject it.
+        self.fail_keys: set[str] = set()
 
     def search_issues(self, jql: str, **kwargs):
         self.queries.append(jql)
         if self.raises:
             raise self.raises
+        if "issue IN (" not in jql:
+            # Boundary-only probe (no keys): succeeds unless raises is set.
+            return SimpleNamespace(issues=[], total=0)
         keys = {
             key.strip().strip('"')
             for key in jql.split("issue IN (", 1)[1].split(")", 1)[0].split(",")
         }
-        matched = [k for k in keys if k.upper() in self.in_scope]
+        if (
+            self.fail_batches_larger_than is not None
+            and len(keys) > self.fail_batches_larger_than
+        ):
+            raise RuntimeError("Jira rejected the batch query")
+        if keys & self.fail_keys:
+            raise RuntimeError("An issue with key does not exist for field 'issue'")
+        pool = self.in_scope
+        if " AND (" in jql and self.write_scope is not None:
+            pool = {k.upper() for k in self.write_scope}
+        matched = [k for k in keys if k.upper() in pool]
         issues = [SimpleNamespace(key=k) for k in matched]
         if self.truncate and len(issues) > 1:
             # Simulate a clamped pagination limit: report more than returned
@@ -150,7 +170,7 @@ class TestIssuesOutsideScope:
         config = FakeConfig(write_jql_filter="team = ours")
         fetcher = FakeFetcher(config, {"FOO-1"})
         issues_outside_scope(fetcher, ["FOO-1"], "write")
-        assert fetcher.queries == ['issue IN (FOO-1) AND (team = ours)']
+        assert fetcher.queries == ["issue IN (FOO-1) AND (team = ours)"]
 
     def test_read_access_ignores_the_write_boundary(self):
         """A read-only issue stays readable."""
@@ -178,16 +198,24 @@ class TestIssuesOutsideScope:
         assert issues_outside_scope(fetcher, ["FOO-1", " FOO-1 ", ""], "read") == []
         assert len(fetcher.queries) == 1
 
-    def test_lookup_failure_fails_closed(self):
-        fetcher = FakeFetcher(FakeConfig(jql_filter="team = ours"), {"FOO-1"})
-        fetcher.raises = RuntimeError("Jira exploded")
-        assert issues_outside_scope(fetcher, ["FOO-1"], "read") == ["FOO-1"]
+    def test_broken_boundary_raises_evaluation_error(self):
+        """An unevaluable boundary must deny, and say it is a misconfig."""
+        fetcher = FakeFetcher(FakeConfig(jql_filter="nosuchfield = x"), {"FOO-1"})
+        fetcher.raises = RuntimeError("Error in JQL Query")
+        with pytest.raises(ScopeEvaluationError):
+            issues_outside_scope(fetcher, ["FOO-1"], "read")
+
+    def test_unknown_key_is_denied_not_reported_as_misconfig(self):
+        """One bad key must deny only itself, and not blame the operator."""
+        fetcher = FakeFetcher(FakeConfig(jql_filter="project = FOO"), {"FOO-1"})
+        # The boundary alone evaluates fine; only queries naming the unknown
+        # key fail, exactly as Jira behaves for a nonexistent issue.
+        fetcher.fail_keys = {"NOPE-1"}
+        assert issues_outside_scope(fetcher, ["FOO-1", "NOPE-1"], "read") == ["NOPE-1"]
 
     def test_truncated_result_rechecks_individually(self):
         """A clamped pagination limit must not fabricate a violation."""
-        fetcher = FakeFetcher(
-            FakeConfig(jql_filter="team = ours"), {"FOO-1", "FOO-2"}
-        )
+        fetcher = FakeFetcher(FakeConfig(jql_filter="team = ours"), {"FOO-1", "FOO-2"})
         fetcher.truncate = True
         assert issues_outside_scope(fetcher, ["FOO-1", "FOO-2"], "read") == []
 
@@ -207,7 +235,145 @@ class TestAssertIssuesInScope:
         assert "add comment" in message
         assert "JIRA_WRITE_JQL_FILTER" in message
 
+    def test_unevaluable_boundary_reports_misconfiguration(self):
+        """The agent must be told this is the operator's problem."""
+        fetcher = FakeFetcher(FakeConfig(jql_filter="nosuchfield = x"), set())
+        fetcher.raises = RuntimeError("Error in JQL Query")
+        with pytest.raises(ScopeEvaluationError) as excinfo:
+            assert_issues_in_scope(fetcher, ["FOO-1"], "read", "get issue")
+        message = str(excinfo.value)
+        assert "misconfiguration" in message
+        assert "retrying will not help" in message.lower()
+
+    def test_denial_tells_the_agent_to_stop(self):
+        fetcher = FakeFetcher(FakeConfig(jql_filter="project = FOO"), set())
+        with pytest.raises(ValueError) as excinfo:
+            assert_issues_in_scope(fetcher, ["FOO-1"], "read", "get issue")
+        assert "fixed boundary" in str(excinfo.value)
+
+    def test_plural_subject_grammar(self):
+        fetcher = FakeFetcher(FakeConfig(jql_filter="project = FOO"), set())
+        with pytest.raises(ValueError, match="FOO-1, FOO-2 are outside"):
+            assert_issues_in_scope(fetcher, ["FOO-1", "FOO-2"], "read", "get issue")
+
     def test_read_violation_message(self):
         fetcher = FakeFetcher(FakeConfig(jql_filter="team = ours"), set())
         with pytest.raises(ValueError, match="outside the readable scope"):
             assert_issues_in_scope(fetcher, ["FOO-1"], "read", "get issue")
+
+
+class TestClassifyIssueKeys:
+    """Preflight classification: writable / read-only / denied."""
+
+    def test_no_boundary_everything_visible_is_writable(self):
+        fetcher = FakeFetcher(FakeConfig(), {"FOO-1"})
+        assert classify_issue_keys(fetcher, ["FOO-1"]) == {"FOO-1": "writable"}
+
+    def test_missing_issue_is_denied_not_read_only(self):
+        """A nonexistent key must not be reported as merely read-only."""
+        fetcher = FakeFetcher(FakeConfig(write_jql_filter="team = ours"), set())
+        assert classify_issue_keys(fetcher, ["NOPE-1"]) == {"NOPE-1": "denied"}
+
+    def test_visible_but_unmatched_is_read_only(self):
+        config = FakeConfig(write_jql_filter="team = ours")
+        fetcher = FakeFetcher(config, {"FOO-1"})
+        # visible to the plain query, but the write clause query returns none
+        fetcher.write_scope = set()
+        assert classify_issue_keys(fetcher, ["FOO-1"]) == {"FOO-1": "read-only"}
+
+    def test_mixed_verdicts_preserve_input_order(self):
+        config = FakeConfig(write_jql_filter="team = ours")
+        fetcher = FakeFetcher(config, {"FOO-1", "FOO-2"})
+        fetcher.write_scope = {"FOO-1"}
+        assert list(classify_issue_keys(fetcher, ["FOO-2", "FOO-1", "NOPE-1"])) == [
+            "FOO-2",
+            "FOO-1",
+            "NOPE-1",
+        ]
+
+    def test_projects_filter_violation_is_denied_without_api_call(self):
+        fetcher = FakeFetcher(FakeConfig(projects_filter="FOO"), {"BAR-1"})
+        assert classify_issue_keys(fetcher, ["BAR-1"]) == {"BAR-1": "denied"}
+        assert fetcher.queries == []
+
+    def test_batch_failure_falls_back_to_per_key_probing(self):
+        """One unknown key must not hide the valid ones."""
+        fetcher = FakeFetcher(FakeConfig(), {"FOO-1"})
+        fetcher.fail_batches_larger_than = 1
+        verdicts = classify_issue_keys(fetcher, ["FOO-1", "NOPE-1"])
+        assert verdicts == {"FOO-1": "writable", "NOPE-1": "denied"}
+
+
+class TestBoundaryCannotBeEscaped:
+    """Regressions for ways a caller could break out of the boundary."""
+
+    @pytest.mark.parametrize(
+        "malicious",
+        [
+            # Closes the wrapper and reopens it: because JQL binds AND
+            # tighter than OR, the first branch would be unconstrained.
+            "project = SECRET) OR (project = SECRET",
+            "project = SECRET) OR (project = SECRET ORDER BY created DESC",
+            "a = 1)) OR ((b = 2",
+            "x = 1) OR (y = 2",
+            # Stray closer alone
+            "project = X)",
+            # Unterminated quote
+            'summary ~ "unterminated',
+        ],
+    )
+    def test_unbalanced_jql_is_rejected(self, malicious):
+        with pytest.raises(ValueError, match="Malformed JQL"):
+            and_jql_clause(malicious, "labels = automation")
+
+    @pytest.mark.parametrize(
+        "jql",
+        [
+            "project = FOO",
+            "(a = 1 OR b = 2) AND c = 3",
+            'summary ~ "close ) paren"',
+            'summary ~ "x ORDER BY y"',
+            "project = FOO ORDER BY created DESC",
+            'assignee in membersOf("group (x)")',
+            "text ~ 'it\\'s'",
+        ],
+    )
+    def test_balanced_jql_is_constrained(self, jql):
+        result = and_jql_clause(jql, "labels = automation")
+        assert "(labels = automation)" in result
+
+    def test_order_by_inside_a_string_is_not_split(self):
+        result = and_jql_clause('summary ~ "x ORDER BY y"', "labels = a")
+        assert result == '(summary ~ "x ORDER BY y") AND (labels = a)'
+
+    def test_order_by_in_the_boundary_is_stripped(self):
+        """A boundary pasted from a saved filter usually ends in ORDER BY."""
+        result = and_jql_clause("project = FOO", "labels = a ORDER BY created")
+        assert result == "(project = FOO) AND (labels = a)"
+
+
+class TestOpaqueIdentifiers:
+    """A numeric issue id must not slip past a project allowlist."""
+
+    def test_numeric_id_is_verified_against_jira(self):
+        config = FakeConfig(projects_filter="ALLOWED")
+        fetcher = FakeFetcher(config, set())
+        assert issues_outside_scope(fetcher, ["10042"], "read") == ["10042"]
+        assert fetcher.queries, "a numeric id must be checked server-side"
+
+    def test_numeric_id_in_scope_is_allowed(self):
+        config = FakeConfig(projects_filter="ALLOWED")
+        fetcher = FakeFetcher(config, {"10042"})
+        assert issues_outside_scope(fetcher, ["10042"], "read") == []
+
+    def test_plain_keys_still_need_no_api_call(self):
+        config = FakeConfig(projects_filter="ALLOWED")
+        fetcher = FakeFetcher(config, set())
+        assert issues_outside_scope(fetcher, ["ALLOWED-1"], "read") == []
+        assert fetcher.queries == []
+
+    def test_large_key_list_is_deduplicated_efficiently(self):
+        config = FakeConfig(jql_filter="project = FOO")
+        keys = [f"FOO-{i % 50}" for i in range(5000)]
+        fetcher = FakeFetcher(config, {f"FOO-{i}" for i in range(50)})
+        assert issues_outside_scope(fetcher, keys, "read") == []

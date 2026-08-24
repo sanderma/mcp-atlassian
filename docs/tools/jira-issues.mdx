@@ -3,6 +3,18 @@ title: "Jira Issues"
 description: "Create, read, update, delete, and transition Jira issues"
 ---
 
+### Get Scope
+
+Report which Jira issues this server may read and write.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `issue_keys` | `string` | No | (Optional) Comma-separated issue keys to classify, e.g. 'PROJ-1,PROJ-2'. Each is reported as writable, read-only or denied — use this to check before attempting a change. |
+
+---
+
 ### Get Issue
 
 Get details of a specific Jira issue.
@@ -51,7 +63,7 @@ Create a new Jira issue with optional Epic link or parent for subtasks.
 | `summary` | `string` | Yes | Summary/title of the issue |
 | `issue_type` | `string` | Yes | Issue type (e.g. 'Task', 'Bug', 'Story', 'Epic', 'Subtask'). The available types depend on your project configuration. For subtasks, use 'Subtask' (not 'Sub-task') and include parent in additional_fields. |
 | `assignee` | `string` | No | (Optional) Assignee's user identifier (string): Email, display name, or account ID (e.g., 'user@example.com', 'John Doe', 'accountid:...') |
-| `description` | `string` | No | Issue description in Markdown format. On Jira Cloud, use '`{expand:Title}`...`{expand}`' for a collapsible section. |
+| `description` | `string` | No | Issue description in Markdown format (not Jira wiki markup; the server converts automatically). On Jira Cloud, use '`{expand:Title}`...`{expand}`' for a collapsible section. |
 | `components` | `string` | No | (Optional) Comma-separated list of component names to assign (e.g., 'Frontend,API') |
 | `additional_fields` | `string` | No | (Optional) JSON string of additional fields to set. Examples: - Set priority: `{"priority": {"name": "High"}}` - Add labels: `{"labels": ["frontend", "urgent"]}` - Link to parent (for any issue type): `{"parent": "PROJ-123"}` - Link to epic: `{"epicKey": "EPIC-123"}` or `{"epic_link": "EPIC-123"}` - Set Fix Version/s: `{"fixVersions": [{"id": "10020"}]}` - Custom fields: `{"customfield_10010": "value"}` |
 **Example:**

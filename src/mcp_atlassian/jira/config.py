@@ -51,6 +51,31 @@ def _clean_optional(raw: str | None) -> str | None:
     return cleaned or None
 
 
+_TRAILING_ORDER_BY_RE = re.compile(r"\s+ORDER\s+BY\s+.*$", re.IGNORECASE)
+
+
+def _clean_scope_jql(raw: str | None, setting: str) -> str | None:
+    """Normalize a scope JQL boundary, stripping a trailing ORDER BY.
+
+    Boundaries are ANDed into other queries as ``(clause)``. A sort order
+    is meaningless inside that and produces invalid JQL, which would break
+    every Jira call — and operators naturally paste JQL copied from a
+    saved filter, which almost always ends in ORDER BY.
+    """
+    cleaned = _clean_optional(raw)
+    if not cleaned:
+        return None
+    without_order = _TRAILING_ORDER_BY_RE.sub("", cleaned).strip()
+    if without_order != cleaned:
+        logger.warning(
+            "%s contains a trailing ORDER BY, which is not valid inside a "
+            "scope boundary; using %r instead.",
+            setting,
+            without_order,
+        )
+    return without_order or None
+
+
 def _parse_internal_only_projects(raw: str | None) -> frozenset[str]:
     """Parse JIRA_INTERNAL_ONLY_PROJECTS into a set of normalized project keys.
 
@@ -349,8 +374,10 @@ class JiraConfig:
         # JIRA_WRITE_JQL_FILTER narrows *within* that boundary: an issue must
         # match it for write tools to modify it, so everything readable but
         # unmatched is effectively read-only.
-        jql_filter = _clean_optional(os.getenv("JIRA_JQL_FILTER"))
-        write_jql_filter = _clean_optional(os.getenv("JIRA_WRITE_JQL_FILTER"))
+        jql_filter = _clean_scope_jql(os.getenv("JIRA_JQL_FILTER"), "JIRA_JQL_FILTER")
+        write_jql_filter = _clean_scope_jql(
+            os.getenv("JIRA_WRITE_JQL_FILTER"), "JIRA_WRITE_JQL_FILTER"
+        )
 
         # Internal-only projects: server-side guard forcing
         # jira_add_comment/jira_edit_comment to internal (non-customer-visible)

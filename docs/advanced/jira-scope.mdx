@@ -1,0 +1,233 @@
+---
+title: "Jira Read/Write Scope"
+description: "Bound what an agent can see and change in Jira with two JQL filters — JIRA_JQL_FILTER for reads and JIRA_WRITE_JQL_FILTER for writes"
+---
+
+`READ_ONLY_MODE` is all-or-nothing: either every write tool is disabled, or the
+agent can change anything the account can. Two JQL boundaries split that
+decision per issue, so an agent can run with the smallest useful set of
+permissions — read broadly, change only what the operator allows.
+
+| Variable | Boundary | Effect |
+|----------|----------|--------|
+| `JIRA_JQL_FILTER` | Read | ANDed into every JQL query the server issues, and required of any issue addressed directly by key. Issues that do not match are invisible to the agent. |
+| `JIRA_WRITE_JQL_FILTER` | Write | Applied **within** the read boundary. A write tool refuses to touch an issue that does not match, so everything readable but unmatched is read-only. |
+
+Both are plain JQL, exactly as you would type it into Jira's issue search. Both
+are also available as CLI flags: `--jira-jql-filter` and
+`--jira-write-jql-filter`.
+
+## Recipes
+
+Read the whole instance, change only the issues explicitly labelled for the
+agent:
+
+```bash
+JIRA_WRITE_JQL_FILTER=labels = agent-writable
+```
+
+See one project only, and change only the automation-labelled issues in it:
+
+```bash
+JIRA_JQL_FILTER=project = PROJ
+JIRA_WRITE_JQL_FILTER=project = PROJ AND labels = automation
+```
+
+Triage assistant — sees the backlog of two projects, changes only issues
+assigned to the account it runs as:
+
+```bash
+JIRA_JQL_FILTER=project IN (PROJ, TEAM) AND statusCategory != Done
+JIRA_WRITE_JQL_FILTER=assignee = currentUser()
+```
+
+Read-only agent with a narrow view — `READ_ONLY_MODE` disables every write tool
+(Jira and Confluence), so no write boundary is needed:
+
+```bash
+READ_ONLY_MODE=true
+JIRA_JQL_FILTER=project = PROJ
+```
+
+<Note>
+The write boundary is evaluated **inside** the read boundary, so it never needs
+to repeat it — but repeating it is harmless. `JIRA_WRITE_JQL_FILTER` on its own,
+with no `JIRA_JQL_FILTER`, is a valid and useful configuration: reads stay
+unrestricted, writes do not.
+</Note>
+
+## Semantics
+
+- **Configuration-only.** No tool argument can widen a boundary. A caller's own
+  JQL is parenthesized and ANDed with the boundary, so an `OR` in the query
+  cannot escape it; a trailing `ORDER BY` is preserved. A caller can only narrow
+  further, as with `JIRA_PROJECTS_FILTER`.
+- **Enforced at two points.** Every JQL-issuing path (search, project and epic
+  lookups, board issues) constrains the query itself. Tools that address an
+  issue by key never issue a JQL query, so they are checked at the tool call,
+  before the tool body runs.
+- **Complete by construction.** Every Jira tool that accepts an issue key
+  carries the check, and a unit test fails the build if a new one does not, so a
+  tool cannot silently bypass a boundary. `jira_remove_issue_link` takes a link
+  id rather than a key: the link is resolved to both endpoint issues and both
+  must be in scope, and the call is refused if the link cannot be resolved.
+- **Fail-closed.** An issue that does not come back from the scope query is
+  refused — whether it does not match the boundary, does not exist, or is
+  invisible to the credentials. A boundary that cannot be evaluated at all
+  refuses too, rather than falling open.
+- **Per user.** In multi-user HTTP transports the boundaries come from the
+  server's environment and apply to every caller, whatever credentials they
+  present.
+- **Cost.** With a boundary configured, a tool call carrying issue keys runs one
+  extra JQL search to validate them (batched, 20 keys per query). With no
+  boundary configured the check is skipped entirely — no client is even
+  resolved — so the default configuration is unaffected.
+- **Sort orders are dropped.** A boundary is ANDed into other queries as
+  `(clause)`, where a sort order is invalid, so a trailing `ORDER BY` is
+  stripped from either filter at startup and a warning is logged. JQL copied
+  from a saved filter can be pasted as-is.
+
+When a call is refused, the agent gets an explicit error rather than a generic
+failure — and one that says the boundary is fixed, so it does not retry or go
+tool-shopping:
+
+```text
+Cannot update issue: PROJ-123 is outside the writable scope
+(JIRA_WRITE_JQL_FILTER='labels = automation'). Such an issue may be readable
+but read-only, may not exist, or may be invisible to these credentials. This is
+a fixed boundary in this server's configuration — another tool, a retry, or a
+different phrasing will not succeed. Report the limit instead of working
+around it.
+```
+
+A boundary the Jira instance cannot evaluate (an invalid field, a typo) is
+reported differently — as a server misconfiguration for the operator to fix,
+not as a permission decision — and access is still refused.
+
+## Composing with the other limits
+
+| Setting | Relationship to the JQL boundaries |
+|---------|-----------------------------------|
+| `JIRA_PROJECTS_FILTER` | Still applies, and is checked first without an API call (project key prefixes are compared locally). Effectively a cheap project-level read boundary. |
+| `READ_ONLY_MODE` | Wins outright. With `READ_ONLY_MODE=true` every write tool is disabled regardless of `JIRA_WRITE_JQL_FILTER`. |
+| `ENABLED_TOOLS` / `TOOLSETS` | Independent — they decide which tools exist at all. Use them to remove capabilities (e.g. issue creation) that a JQL boundary cannot express. |
+| Jira permissions | The real limit. These boundaries are server-side guardrails against agent mistakes, layered on top of the permissions of the account the server authenticates as — not a replacement for them. |
+
+<Warning>
+An issue addressed by numeric issue id (rather than a `PROJ-123` key) is not
+matched against `JIRA_PROJECTS_FILTER`, which compares key prefixes locally.
+`JIRA_JQL_FILTER` covers ids as well as keys, so prefer it when the boundary
+matters.
+</Warning>
+
+## What the boundaries do not cover
+
+- **Issue creation.** A new issue has no field values to match, so no boundary
+  constrains `jira_create_issue` or `jira_batch_create_issues` — including
+  `JIRA_PROJECTS_FILTER` and `JIRA_JQL_FILTER`, which are read-side filters and
+  are not applied to creation. To stop an agent creating issues, drop the tools
+  (`ENABLED_TOOLS` / `TOOLSETS`), set `READ_ONLY_MODE=true`, or remove the Create
+  Issues permission from the account in Jira.
+- **Confluence.** The boundaries are Jira-only. Use `CONFLUENCE_SPACES_FILTER`
+  for Confluence.
+- **Non-issue metadata.** Boards, sprints, versions, projects, fields and user
+  lookups are not filtered. Issues returned *through* a board or sprint search
+  are, because those paths go through the scoped search.
+- **The server's own configuration.** Anyone who can edit the environment the
+  server runs with can widen the boundary. Keep the credentials themselves
+  least-privileged too.
+
+## Verifying a configuration
+
+Before handing a configuration to an agent, preflight it. The check validates
+that the configured JQL parses, reports how many issues each boundary allows,
+lists a sample labelled writable or read-only, and exits non-zero if Jira
+rejected a filter:
+
+```bash
+uvx mcp-atlassian --jira-scope-check
+```
+
+It reads the same environment as the server, including `.env` and `--env-file`,
+and exits instead of starting the server.
+
+Pass issue keys to classify them individually as `writable`, `read-only`, or
+`denied`:
+
+```bash
+uvx mcp-atlassian --jira-scope-check-issues PROJ-1,PROJ-2
+```
+
+An agent can ask the same question in-band: the `jira_get_scope` tool reports
+the boundaries in effect, what they mean, and — given a comma-separated
+`issue_keys` argument — the same `writable` / `read-only` / `denied` verdict per
+issue. Use it before planning work that changes issues, and after a refusal.
+
+The CLI flags are read before the check runs, so a candidate boundary can be
+tried without editing the environment:
+
+```bash
+uvx mcp-atlassian \
+  --jira-jql-filter "project = PROJ" \
+  --jira-write-jql-filter "labels = automation" \
+  --jira-scope-check-issues PROJ-1
+```
+
+## Handing a narrower scope to a subagent
+
+The boundaries are environment variables of a server **process**. A second MCP
+server started for a subagent gets its own environment and inherits nothing, so
+whatever that configuration sets is the entire boundary for that subagent.
+
+To give a subagent less access than you have, AND your own boundary into theirs
+rather than replacing it:
+
+```json
+{
+  "mcpServers": {
+    "mcp-atlassian-restricted": {
+      "command": "uvx",
+      "args": ["mcp-atlassian"],
+      "env": {
+        "JIRA_URL": "https://your-company.atlassian.net",
+        "JIRA_USERNAME": "your.email@company.com",
+        "JIRA_API_TOKEN": "your_api_token",
+        "JIRA_JQL_FILTER": "project = PROJ AND labels = agent-visible",
+        "JIRA_WRITE_JQL_FILTER": "project = PROJ AND labels = agent-visible AND labels = automation",
+        "TOOLSETS": "jira_issues,jira_comments",
+        "ENABLED_TOOLS": "jira_search,jira_get_issue,jira_update_issue,jira_add_comment"
+      }
+    }
+  }
+}
+```
+
+`TOOLSETS` and `ENABLED_TOOLS` intersect, so the subagent above can search,
+read, update and comment — and cannot create or delete issues, which no JQL
+boundary could have prevented.
+
+Rules of thumb when composing a narrower configuration:
+
+1. **Never drop a clause.** The child's read boundary must imply the parent's:
+   write it as `<parent read boundary> AND <extra restriction>`.
+2. **Narrow the write boundary the same way**, and remember it is evaluated
+   inside the child's read boundary.
+3. **Remove capabilities the JQL cannot express** — issue creation, deletion,
+   Confluence — with `TOOLSETS` / `ENABLED_TOOLS`, or `READ_ONLY_MODE=true` for
+   a read-only subagent.
+4. **Keep it valid JQL.** An unparseable filter is rejected by Jira at query
+   time; confirm with `--jira-scope-check` before handing the config over.
+
+## Reference
+
+| Environment variable | CLI flag | Value |
+|----------------------|----------|-------|
+| `JIRA_JQL_FILTER` | `--jira-jql-filter` | JQL for the read boundary, e.g. `project = PROJ AND labels = agent-visible` |
+| `JIRA_WRITE_JQL_FILTER` | `--jira-write-jql-filter` | JQL for the write boundary, e.g. `labels = automation` |
+| `JIRA_PROJECTS_FILTER` | `--jira-projects-filter` | Comma-separated project keys, e.g. `PROJ,TEAM` |
+| `READ_ONLY_MODE` | `--read-only` | `true` disables all write tools |
+| — | `--jira-scope-check` | Preflight the configuration and exit |
+| — | `--jira-scope-check-issues KEYS` | Classify the given issue keys during the preflight |
+
+See [Configuration](/docs/configuration) for the full environment variable
+reference and [JQL Guide](/docs/guides/jql-guide) for query syntax.

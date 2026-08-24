@@ -44,6 +44,35 @@ description: "Fix auth errors (401/403), field issues, rate limiting, SSL proble
     Ensure your Atlassian account has sufficient permissions to access the spaces/projects you're targeting.
   </Accordion>
 
+  <Accordion title='"Outside the readable scope" / "outside the writable scope"'>
+    These messages come from the server's own
+    [Jira read/write scope](/docs/advanced/jira-scope), not from Jira:
+
+    ```text
+    Cannot update issue: PROJ-123 is outside the writable scope
+    (JIRA_WRITE_JQL_FILTER='labels = automation'). ...
+    ```
+
+    The issue did not match `JIRA_JQL_FILTER` / `JIRA_WRITE_JQL_FILTER`, did not
+    match `JIRA_PROJECTS_FILTER`, does not exist, or is invisible to the
+    configured credentials — the check is fail-closed, so all four look alike.
+
+    A different message — "this server's access scope could not be evaluated" —
+    means the boundary JQL itself was rejected by Jira. Fix the filter; the
+    agent cannot work around it.
+
+    Diagnose without editing the configuration:
+
+    ```bash
+    uvx mcp-atlassian --jira-scope-check PROJ-123
+    ```
+
+    It prints the boundaries in effect, the query a search turns into, and a
+    `writable` / `read-only` / `denied` verdict for each key you pass. Searches
+    that silently return nothing have the same cause: the read boundary is
+    ANDed into every query.
+  </Accordion>
+
 </AccordionGroup>
 
 ## Debugging

@@ -230,8 +230,9 @@ async def search(
         Field(
             description=(
                 "(Optional) Comma-separated list of space keys to filter results by. "
-                "Overrides the environment variable CONFLUENCE_SPACES_FILTER if provided. "
-                "Use empty string to disable filtering."
+                "Narrows within the server's configured CONFLUENCE_SPACES_FILTER; "
+                "it cannot widen it or reach spaces the server excludes. "
+                "Use empty string to apply no additional narrowing."
             ),
             default=None,
         ),

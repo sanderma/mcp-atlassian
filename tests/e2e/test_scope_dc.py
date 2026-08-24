@@ -110,9 +110,7 @@ def test_write_boundary_makes_unmatched_issues_read_only(dc_jira, scope_issues):
 
 def test_read_boundary_hides_unmatched_issues(dc_jira, scope_issues):
     marker = scope_issues["marker"]
-    fetcher = make_fetcher(
-        dc_jira, jql_filter=f'summary ~ "scope-{marker} team-ours"'
-    )
+    fetcher = make_fetcher(dc_jira, jql_filter=f'summary ~ "scope-{marker} team-ours"')
     ours, theirs = scope_issues["ours"], scope_issues["theirs"]
 
     assert issues_outside_scope(fetcher, [ours], "read") == []
@@ -122,9 +120,7 @@ def test_read_boundary_hides_unmatched_issues(dc_jira, scope_issues):
 def test_read_boundary_constrains_search(dc_jira, scope_issues):
     """A search cannot return issues outside the read boundary."""
     marker = scope_issues["marker"]
-    fetcher = make_fetcher(
-        dc_jira, jql_filter=f'summary ~ "scope-{marker} team-ours"'
-    )
+    fetcher = make_fetcher(dc_jira, jql_filter=f'summary ~ "scope-{marker} team-ours"')
     result = fetcher.search_issues(f"project = {PROJECT_KEY}", limit=50)
     keys = {issue.key for issue in result.issues}
     assert scope_issues["ours"] in keys
@@ -134,14 +130,41 @@ def test_read_boundary_constrains_search(dc_jira, scope_issues):
 def test_search_cannot_be_widened_by_caller_jql(dc_jira, scope_issues):
     """An OR in the caller's query must not escape the boundary."""
     marker = scope_issues["marker"]
-    fetcher = make_fetcher(
-        dc_jira, jql_filter=f'summary ~ "scope-{marker} team-ours"'
-    )
+    fetcher = make_fetcher(dc_jira, jql_filter=f'summary ~ "scope-{marker} team-ours"')
     theirs = scope_issues["theirs"]
     result = fetcher.search_issues(
         f"project = {PROJECT_KEY} OR issue = {theirs}", limit=50
     )
     assert theirs not in {issue.key for issue in result.issues}
+
+
+def test_caller_cannot_escape_boundary_with_parens(dc_jira, scope_issues):
+    """The boundary must survive a query that closes its own wrapper.
+
+    JQL binds AND tighter than OR, so `X) OR (Y` would otherwise leave the
+    first branch unconstrained and return the whole instance.
+    """
+    marker = scope_issues["marker"]
+    fetcher = make_fetcher(dc_jira, jql_filter=f'summary ~ "scope-{marker} team-ours"')
+    with pytest.raises(Exception) as excinfo:
+        fetcher.search_issues(
+            f"project = {PROJECT_KEY}) OR (project = {PROJECT_KEY}", limit=50
+        )
+    assert "unbalanced" in str(excinfo.value).lower()
+
+
+def test_numeric_issue_id_is_scope_checked(dc_jira, scope_issues):
+    """A numeric id has no project prefix, so it must be verified in Jira."""
+    marker = scope_issues["marker"]
+    fetcher = make_fetcher(dc_jira, jql_filter=f'summary ~ "scope-{marker} team-ours"')
+    session = requests.Session()
+    session.trust_env = False
+    session.auth = (dc_jira.admin_username, dc_jira.admin_password)
+    theirs_id = session.get(
+        f"{dc_jira.jira_url}/rest/api/2/issue/{scope_issues['theirs']}?fields=key",
+        timeout=30,
+    ).json()["id"]
+    assert issues_outside_scope(fetcher, [str(theirs_id)], "read") == [str(theirs_id)]
 
 
 def test_unknown_issue_fails_closed(dc_jira):

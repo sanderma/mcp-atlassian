@@ -10,8 +10,8 @@ Two operator-configured JQL boundaries narrow what the agent may touch:
     The write boundary, applied *within* the read boundary: an issue must
     match it before a write tool may modify it. Everything readable but
     unmatched is therefore read-only — e.g. ``JIRA_JQL_FILTER`` empty and
-    ``JIRA_WRITE_JQL_FILTER="team = ours"`` lets the agent read the whole
-    instance but only write to its own team's issues.
+    ``JIRA_WRITE_JQL_FILTER="labels = automation"`` lets the agent read the
+    whole instance but only write to issues carrying that label.
 
 Both are configuration-only: no tool argument can widen them (a caller may
 only narrow further, as with ``JIRA_PROJECTS_FILTER``).
@@ -30,6 +30,17 @@ from .utils import quote_jql_identifier_if_needed
 logger = logging.getLogger("mcp-jira")
 
 Access = Literal["read", "write"]
+
+
+class ScopeEvaluationError(ValueError):
+    """A configured boundary could not be evaluated (usually invalid JQL).
+
+    Kept distinct from a genuine out-of-scope denial so the caller can tell
+    the agent "this server is misconfigured" instead of "you may not touch
+    that issue" — the remedy is an operator's, not the agent's. Access is
+    still refused either way.
+    """
+
 
 _ORDER_BY_RE = re.compile(r"\s+(ORDER\s+BY\s+.*)$", re.IGNORECASE)
 
@@ -51,8 +62,65 @@ class ScopedFetcher(Protocol):
     def search_issues(self, jql: str, **kwargs: Any) -> Any: ...
 
 
+def _scan_jql(jql: str) -> tuple[bool, int]:
+    """Scan JQL outside string literals.
+
+    Returns:
+        ``(quotes_balanced, paren_depth_delta)``. A well-formed query has
+        balanced quotes and a delta of 0; the index of a top-level
+        ``ORDER BY`` is found separately by :func:`_split_order_by`.
+    """
+    depth = 0
+    quote: str | None = None
+    index = 0
+    while index < len(jql):
+        char = jql[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                # Closes a paren the query never opened: enough on its own
+                # to break out of a wrapper.
+                return quote is None, depth
+        index += 1
+    return quote is None, depth
+
+
+def _split_order_by(jql: str) -> tuple[str, str]:
+    """Split a trailing top-level ORDER BY off ``jql``.
+
+    Quote-aware, so ``summary ~ "x ORDER BY y"`` is not mistaken for a
+    sort clause.
+
+    Returns:
+        ``(query, order_by)``; ``order_by`` is "" when there is none.
+    """
+    for match in reversed(list(_ORDER_BY_RE.finditer(jql))):
+        head = jql[: match.start()]
+        balanced, depth = _scan_jql(head)
+        if balanced and depth == 0:
+            return head, match.group(1)
+    return jql, ""
+
+
 def and_jql_clause(jql: str | None, clause: str) -> str:
     """AND ``clause`` into ``jql``, keeping a trailing ORDER BY valid.
+
+    ``jql`` is wrapped in parentheses so ``clause`` constrains all of it.
+    That only holds if ``jql`` is itself balanced: a query such as
+    ``project = X) OR (project = Y`` would close the wrapper and, because
+    JQL binds AND tighter than OR, leave its first branch unconstrained —
+    a complete escape from the boundary. Unbalanced input is therefore
+    rejected rather than composed.
 
     Args:
         jql: The query to constrain. May be empty or ORDER BY-only.
@@ -60,17 +128,33 @@ def and_jql_clause(jql: str | None, clause: str) -> str:
 
     Returns:
         The constrained query.
+
+    Raises:
+        ValueError: If ``jql`` has unbalanced parentheses or quotes.
     """
+    # A boundary is ANDed in as "(clause)", where a sort order is invalid.
+    # Configuration strips this too; belt and braces for clauses that reach
+    # here from a config not built by JiraConfig.from_env().
+    clause = _split_order_by(clause.strip())[0].strip()
+
     if not jql or not jql.strip():
         return clause
     if jql.strip().upper().startswith("ORDER BY"):
         return f"{clause} {jql}"
 
+    balanced, depth = _scan_jql(jql)
+    if not balanced or depth != 0:
+        raise ValueError(
+            "Malformed JQL: unbalanced "
+            f"{'quotes' if not balanced else 'parentheses'}. The query "
+            "cannot be safely constrained to this server's configured "
+            "scope, so it was rejected."
+        )
+
     grouped = f"({clause})"
-    order_match = _ORDER_BY_RE.search(jql)
-    if order_match:
-        head = jql[: order_match.start()]
-        return f"({head}) AND {grouped} {order_match.group(1)}"
+    head, order_by = _split_order_by(jql)
+    if order_by:
+        return f"({head.rstrip()}) AND {grouped} {order_by}"
     return f"({jql}) AND {grouped}"
 
 
@@ -108,7 +192,7 @@ def apply_jql_filter(jql: str, config: Any) -> str:
     return constrained
 
 
-def _allowed_projects(config: Any) -> list[str] | None:
+def allowed_project_keys(config: Any) -> list[str] | None:
     """Project keys from JIRA_PROJECTS_FILTER, upper-cased, or None."""
     projects_filter = _str_option(config, "projects_filter")
     if not projects_filter:
@@ -124,7 +208,7 @@ def keys_outside_projects_filter(keys: list[str], config: Any) -> list[str]:
     issue ids, for instance) are not evaluated here; the JQL scope check
     covers those when a JQL filter is configured.
     """
-    projects = _allowed_projects(config)
+    projects = allowed_project_keys(config)
     if not projects:
         return []
     outside = []
@@ -145,7 +229,9 @@ def _issue_in_clause(keys: list[str]) -> str:
     return f"issue IN ({quoted})"
 
 
-def _matching_keys(fetcher: ScopedFetcher, keys: list[str], clause: str | None) -> set[str]:
+def _matching_keys(
+    fetcher: ScopedFetcher, keys: list[str], clause: str | None
+) -> set[str]:
     """Return the subset of ``keys`` visible in scope, upper-cased.
 
     ``search_issues`` applies the configured read boundary itself, so the
@@ -159,14 +245,13 @@ def _matching_keys(fetcher: ScopedFetcher, keys: list[str], clause: str | None) 
             jql = f"{jql} AND ({clause})"
         result = fetcher.search_issues(jql, fields=["key"], limit=len(chunk))
         issues = getattr(result, "issues", []) or []
-        seen = {
-            issue.key.upper()
-            for issue in issues
-            if getattr(issue, "key", None)
-        }
+        seen = {issue.key.upper() for issue in issues if getattr(issue, "key", None)}
         # A clamped pagination limit could truncate the answer and make a
         # matching issue look out of scope; re-check the stragglers singly.
-        if getattr(result, "total", len(issues)) > len(issues):
+        # Driven off the returned keys rather than ``total``, which Jira
+        # Cloud's v3 search reports as -1 — denial is the rare path, so the
+        # extra calls cost nothing in the common case.
+        if len(seen) < len(chunk):
             for key in chunk:
                 if key.upper() in seen:
                     continue
@@ -195,9 +280,12 @@ def issues_outside_scope(
         The offending keys, in input order. Empty when no boundary applies.
     """
     unique: list[str] = []
+    seen_upper: set[str] = set()
     for key in keys:
         cleaned = (key or "").strip()
-        if cleaned and cleaned.upper() not in {k.upper() for k in unique}:
+        upper = cleaned.upper()
+        if cleaned and upper not in seen_upper:
+            seen_upper.add(upper)
             unique.append(cleaned)
     if not unique:
         return []
@@ -212,20 +300,133 @@ def issues_outside_scope(
     write_clause = (
         _str_option(config, "write_jql_filter") if access == "write" else None
     )
-    if not _str_option(config, "jql_filter") and not write_clause:
+    # A numeric issue id carries no project prefix, so the local check above
+    # cannot judge it. Verify such identifiers against Jira whenever a
+    # project allowlist is configured — otherwise an id would slip past a
+    # boundary that a key would have been refused by.
+    opaque_ids = [k for k in remaining if not _ISSUE_KEY_RE.match(k)]
+    needs_lookup = (
+        bool(_str_option(config, "jql_filter"))
+        or bool(write_clause)
+        or (bool(allowed_project_keys(config)) and bool(opaque_ids))
+    )
+    if not needs_lookup:
         return outside
 
     try:
         matching = _matching_keys(fetcher, remaining, write_clause)
     except Exception as exc:  # noqa: BLE001 - fail closed on any lookup failure
-        logger.warning(
-            "Scope check failed for %s (access=%s); denying: %s",
-            ", ".join(remaining),
-            access,
-            exc,
-        )
-        return outside + remaining
+        # Jira rejects the query for two very different reasons: the
+        # boundary JQL is invalid (an operator's problem), or one of the
+        # keys does not exist (an ordinary denial). Probe the boundary on
+        # its own to tell them apart rather than blaming the wrong party.
+        if not _boundary_is_evaluable(fetcher, write_clause):
+            raise ScopeEvaluationError(str(exc)) from exc
+        matching = _probe_keys(fetcher, remaining, write_clause)
     return outside + [k for k in remaining if k.upper() not in matching]
+
+
+def _boundary_is_evaluable(fetcher: ScopedFetcher, clause: str | None) -> bool:
+    """Whether the configured boundary itself runs without error."""
+    try:
+        fetcher.search_issues(clause or "", fields=["key"], limit=1)
+    except Exception:  # noqa: BLE001 - the boundary is the broken part
+        return False
+    return True
+
+
+def _probe_keys(
+    fetcher: ScopedFetcher, keys: list[str], clause: str | None
+) -> set[str]:
+    """Check keys one at a time, treating an unresolvable key as denied.
+
+    Used when a batch query failed for a key-specific reason (an unknown
+    key makes some Jira versions reject the whole query), so that one bad
+    key cannot deny the rest.
+    """
+    matching: set[str] = set()
+    for key in keys:
+        try:
+            matching |= _matching_keys(fetcher, [key], clause)
+        except Exception:  # noqa: BLE001 - unknown key: denied
+            logger.debug("Scope probe failed for %s; treating as denied", key)
+    return matching
+
+
+def _visible_keys(fetcher: ScopedFetcher, keys: list[str]) -> set[str]:
+    """Keys that come back from Jira within the read boundary.
+
+    Unlike the enforcement path this never assumes: a batch query that Jira
+    rejects (an unknown key makes some Jira versions fail the whole query)
+    is retried key by key, so one bad key cannot hide the others.
+    """
+    try:
+        return _matching_keys(fetcher, keys, None)
+    except Exception:  # noqa: BLE001 - fall back to per-key probing
+        visible: set[str] = set()
+        for key in keys:
+            try:
+                if _matching_keys(fetcher, [key], None):
+                    visible.add(key.upper())
+            except Exception:  # noqa: BLE001 - unknown/invisible key
+                continue
+        return visible
+
+
+def classify_issue_keys(fetcher: ScopedFetcher, keys: list[str]) -> dict[str, str]:
+    """Classify issues as ``writable``, ``read-only`` or ``denied``.
+
+    Reports what an agent would actually experience for each key, for
+    preflight/diagnostic use — enforcement uses ``issues_outside_scope``.
+
+    Args:
+        fetcher: Jira fetcher providing ``config`` and ``search_issues``.
+        keys: Issue keys to classify.
+
+    Returns:
+        Mapping of each input key to its classification.
+    """
+    config = fetcher.config
+    result: dict[str, str] = {}
+
+    blocked_by_projects = set(keys_outside_projects_filter(keys, config))
+    candidates = [k for k in keys if k not in blocked_by_projects]
+    for key in blocked_by_projects:
+        result[key] = "denied"
+
+    if not candidates:
+        return {key: result.get(key, "denied") for key in keys}
+
+    visible = _visible_keys(fetcher, candidates)  # tolerant of bad keys
+    write_clause = _str_option(config, "write_jql_filter")
+    writable = visible
+    if write_clause:
+        in_scope = [k for k in candidates if k.upper() in visible]
+        writable = (
+            _visible_keys_with_clause(fetcher, in_scope, write_clause)
+            if in_scope
+            else set()
+        )
+
+    for key in candidates:
+        upper = key.upper()
+        if upper not in visible:
+            result[key] = "denied"
+        elif upper in writable:
+            result[key] = "writable"
+        else:
+            result[key] = "read-only"
+    return {key: result[key] for key in keys}
+
+
+def _visible_keys_with_clause(
+    fetcher: ScopedFetcher, keys: list[str], clause: str
+) -> set[str]:
+    """``_visible_keys`` narrowed by an extra clause (the write boundary)."""
+    try:
+        return _matching_keys(fetcher, keys, clause)
+    except Exception:  # noqa: BLE001 - fail closed: nothing is writable
+        return set()
 
 
 def assert_issues_in_scope(
@@ -242,12 +443,33 @@ def assert_issues_in_scope(
         access: ``"read"`` or ``"write"``.
         action: Human-readable operation name used in the error message.
     """
-    outside = issues_outside_scope(fetcher, keys, access)
+    try:
+        outside = issues_outside_scope(fetcher, keys, access)
+    except ScopeEvaluationError as exc:
+        message = (
+            f"Cannot {action}: this server's access scope could not be "
+            f"evaluated ({exc}). That is a server misconfiguration, not a "
+            "permission problem — the boundary JQL in JIRA_JQL_FILTER / "
+            "JIRA_WRITE_JQL_FILTER is probably invalid for this Jira "
+            "instance. Report it; retrying will not help."
+        )
+        logger.error(message)
+        raise ScopeEvaluationError(message) from exc
+
     if not outside:
         return
 
     listed = ", ".join(outside)
+    subject = f"{listed} is" if len(outside) == 1 else f"{listed} are"
     config = fetcher.config
+    # Both branches end by telling the agent the boundary is fixed: a
+    # denial that reads as transient invites pointless retries and
+    # tool-shopping around the same wall.
+    final = (
+        "This is a fixed boundary in this server's configuration — another "
+        "tool, a retry, or a different phrasing will not succeed. Report the "
+        "limit instead of working around it."
+    )
     if access == "write":
         write_jql = _str_option(config, "write_jql_filter")
         detail = (
@@ -256,15 +478,20 @@ def assert_issues_in_scope(
             else "configured scope"
         )
         message = (
-            f"Cannot {action}: {listed} is outside the {detail}. "
-            "The issue may be readable but is not writable, may not exist, "
-            "or may be invisible to these credentials."
+            f"Cannot {action}: {subject} outside the {detail}. "
+            "Such an issue may be readable but read-only, may not exist, or "
+            f"may be invisible to these credentials. {final}"
         )
     else:
+        read_note = (
+            " A read boundary (JIRA_JQL_FILTER) is configured on this server."
+            if _str_option(config, "jql_filter")
+            else ""
+        )
         message = (
-            f"Cannot {action}: {listed} is outside the readable scope "
-            "configured for this server, does not exist, or is invisible "
-            "to these credentials."
+            f"Cannot {action}: {subject} outside the readable scope "
+            "configured for this server, does not exist, or is invisible to "
+            f"these credentials.{read_note} {final}"
         )
     logger.warning(message)
     raise ValueError(message)

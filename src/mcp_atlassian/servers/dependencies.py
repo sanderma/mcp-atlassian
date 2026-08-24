@@ -817,6 +817,28 @@ def _create_user_config_for_fetcher(
         raise TypeError(f"Unsupported base_config type: {type(base_config)}")
 
 
+def _carry_over_scope_boundaries(config: Any) -> None:
+    """Re-apply the operator's Jira scope boundaries to a per-request config.
+
+    A header-supplied URL/token builds a fresh config rather than copying
+    the global one, which would drop JIRA_JQL_FILTER /
+    JIRA_WRITE_JQL_FILTER and hand that caller an unbounded server. The
+    boundaries are the operator's policy for this deployment, so they are
+    re-read from the environment and applied regardless of which instance
+    the request targets.
+    """
+    if not isinstance(config, JiraConfig):
+        return
+    from mcp_atlassian.jira.config import _clean_scope_jql
+
+    config.jql_filter = _clean_scope_jql(
+        os.getenv("JIRA_JQL_FILTER"), "JIRA_JQL_FILTER"
+    )
+    config.write_jql_filter = _clean_scope_jql(
+        os.getenv("JIRA_WRITE_JQL_FILTER"), "JIRA_WRITE_JQL_FILTER"
+    )
+
+
 async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
     """Generic fetcher resolution for both Jira and Confluence.
 
@@ -873,6 +895,7 @@ async def _get_fetcher(ctx: Context, spec: _ServiceSpec) -> Any:
                 passthrough_headers=get_header_names(spec.passthrough_env_var),
                 **spec.filter_kwargs,
             )
+            _carry_over_scope_boundaries(header_config)
             return _create_and_validate(
                 request,
                 spec,

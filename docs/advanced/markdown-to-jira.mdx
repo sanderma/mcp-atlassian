@@ -52,7 +52,11 @@ Pipeline (`markdown_to_jira`):
    re-mapped before parsing.
 4. **Parse as CommonMark** with [mistletoe](https://github.com/miyuchina/mistletoe)
    and render with a customized `JiraRenderer` (all rules below).
-5. **Repair intraword emphasis** — CommonMark parses `2*3*4` as
+5. **Join split lists** — a blank line ends a list in Jira, so two
+   adjacent lists cannot be represented; CommonMark splits `- \n- x`
+   into exactly that (an empty item, then the rest), and rendering the
+   split faithfully put a blank line inside what Jira reads as one list.
+6. **Repair intraword emphasis** — CommonMark parses `2*3*4` as
    emphasis, which Jira cannot render intraword; the author's literal
    characters are restored as backslash escapes (`2\*3\*4`). Code
    blocks, monospace, links, images, and URLs are shielded from this
@@ -88,14 +92,35 @@ conversion never destroys content.
 | Prose `{` `}` | always | HTML entity (backslash provably fails on doubled braces; spaced `{ x }` splits the paragraph) |
 | Prose `*` `_` | when touching non-whitespace | backslash (older Jira applies emphasis intraword — snake_case italics; escapes render clean, and the read path can invert them) |
 | Prose `-` `+` `^` `~` | only at word-boundary positions | backslash — `well-known`, `2024-01-15`, `C++`, `x^2` stay readable |
-| Prose `[` `]` | when touching non-whitespace | backslash |
+| Prose `[` `]` | always | backslash — brackets only ever mean link markup to Jira, and the neighbour that would justify leaving one alone can sit in the next inline token, out of the escaper's sight (`text [` and `](url)` arrive separately) |
 | Emoticons `:)` `:(` `;)` `:P` `:D` (also lowercase `:p` `:d`) `(y)` `(n)` `(i)` `(/)` `(x)` `(!)` `(?)` `(+)` `(-)` `(*)` `(*r)` `(*g)` `(*b)` `(*y)` `(on)` `(off)` `(flag)` `(flagoff)` | exact tokens | first character becomes an entity — displays identically (`f(x)` stays `f(x)`), Jira's icon substitution is stopped |
 | Line-start tokens in paragraphs: `h1.`–`h6.`, `bq.`, `\|`, `--` runs | first line and soft-broken continuation lines | entity on the recognizing character (`h2&#46;`) |
 | Inline code content | **everything**: `&` `{}` `[]` `*` `_` `-` `+` `^` `~` `\|` `!` `?` | HTML entities — the only representation Jira passes through verbatim inside `{{...}}`; `&` first so pre-existing entity-like text stays literal |
 | Bare URLs | none (escapes break Jira's autolinking); `{` `}` → `%7B`/`%7D` (Jira macro-parses braces even inside URLs) | percent-encoding |
 | Link text | `\|` → `&#124;` (the alias separator cannot be escaped) | entity |
-| Table cell text | literal `\|` → `&#124;`; structural pipes from `[text\|url]` links untouched | entity |
+| Table cell text | literal `\|` → `&#124;`; structural pipes from `[text\|url]` links untouched; a cell also *opens a line*, so `h1.`–`h6.`, `bq.`, `--` are neutralized there too | entity |
+| Link text (`[alias\|url]`) | `\|` → `&#124;`, `!` → `&#33;` (Jira runs image markup inside a link alias) — applied to author text only, so a nested image keeps its own delimiters; a leading `^` is backslashed (`[^name]` is attachment-link syntax) | entity |
+| Link / image target | percent-encoded, including `[` `]` `\|` `{` `}`. The stock renderer backslash-escapes brackets; Jira strips the backslash, the read path keeps it and the next write encodes it, so the URL grew a `%5C` per edit cycle. An empty target is not a link at all — `[text\|]` is not markup, and the stray pipe splits a table cell | percent-encoding |
+| Image alt | `!` `\|` `,` removed (they end or split the markup); `&` `{` `}` `[` `]` → entities (a macro in the alt terminates the image) | strip + entity |
+| Literal backslash anywhere in prose | always → `&#92;` | entity — see below |
 | Code block content | nothing — `{code}` content is literal | — |
+
+#### Why every backslash becomes `&#92;`
+
+Jira treats a backslash as an escape and **drops it** in front of
+
+```
+! # % ( ) * + - ? @ [ ] ^ _ { | } ~
+```
+
+and keeps it in front of everything else. That set was probed character
+by character against the DC 10.3 renderer; it is also what the read path
+inverts. Two consequences make a "only encode when needed" rule
+unworkable: whether a backslash is followed by one of those characters
+depends on the *rendered* neighbour, not the one in the same Markdown
+token, and a backslash at the end of a table cell escapes the closing
+`|` and merges the cell with the next one. `&#92;` displays as `\` in
+prose, headings, list items and cells alike, so it is used everywhere.
 
 ### Known degradations (unrepresentable in Jira)
 
@@ -113,6 +138,12 @@ conversion never destroys content.
   `test_code_block_languages_keep_their_line_breaks`.
 - **Multi-paragraph list items**: continuation paragraphs lose their
   list attachment (a Jira list limitation).
+- **Image parameters**: `thumbnail`, `width`, `align` and friends are
+  dropped on read — Markdown has nowhere to put them. The alt text and
+  the source survive.
+- **Images whose URL contains `!`**: dropped in favour of the alt text.
+  `!` ends image markup and Jira accepts no encoding for it there, so
+  the alternative is markup that swallows the rest of the paragraph.
 
 ## Where conversion applies
 
@@ -145,8 +176,13 @@ Custom grammar elements:
 - **`[~user]`** — kept as the wiki mention. jira2markdown renders
   `@user`, which the write path cannot turn back into a mention, so an
   agent's edit would silently unlink the person.
-- **`!url|alt=text!`** — keeps the alt text. jira2markdown drops every
-  attribute but `width`/`height` and uses the URL as the alt.
+- **`!url|alt=text!`** — keeps the alt text and drops the rest.
+  jira2markdown discards the alt an author wrote and substitutes the
+  URL, which the write path then re-adds — growing an `alt=` clause per
+  edit cycle. Jira's sizing parameters have no CommonMark form;
+  jira2markdown emits a Pandoc `{width=200}` suffix that this renderer
+  cannot write back, so it would return as visible text beside the
+  image.
 
 Pre-processing (skipped inside `{code}`, `{noformat}` and `{{...}}`,
 where a backslash is literal):
@@ -158,13 +194,20 @@ where a backslash is literal):
 - **Lift Markdown block openers Jira reads as prose**: `1.`, `1)`, `>`
   and `+` at the start of a line. Jira numbers lists with `#`, quotes
   with `bq.` and bullets with `*`, so those lines are plain text there
-  and must not come back as Markdown blocks.
+  and must not come back as Markdown blocks. A Jira block marker
+  (`bq.`, `*`, `#` and their runs) counts as still being at the start of
+  the line, because the conversion replaces it with a Markdown one and
+  promotes whatever followed.
 
 Post-processing (outside code spans and fences):
 
 - **Restore the lifted characters** as Markdown escapes, chosen by
   position: `\*` mid-sentence, `\+` opening a line, `1\.` after a
-  leading number.
+  leading number, `\|` inside a table row. A literal backslash gets a
+  trailing space when it would otherwise land against a line ending (a
+  CommonMark hard break) or a cell's closing `|` — GFM splits cells on
+  any `|` not directly preceded by a backslash, without counting them,
+  so `\\|` reads as an escaped pipe and the cell swallows the row.
 - **Decode the write path's numeric entities** the same way, so a
   reader sees the character Jira displays.
 
@@ -186,30 +229,65 @@ guarantee is **stability**, not identity:
 That is what makes read-modify-write safe. An agent reads an issue,
 edits one line, and writes it back; without stability the untouched
 parts of the description drift a little on every edit. It is enforced by
-`TestRoundTripStability` (a 50+ case corpus, unit) and
+`TestRoundTripStability` (a 68-case corpus, unit), the hazard matrix
+(~3 500 token × context combinations), and
 `test_round_trip_renders_identically` (the same cycle plus a live
 renderer diff of the visible text, e2e). The unit corpus runs twice:
 once through the parser, once through the regex fallback.
+
+For arbitrary generated input the property is stated as *bounded
+convergence* — the cycle reaches a fixed point and the markup does not
+keep growing — because the empty-block shapes below need one cycle more
+than the first write.
 
 Known first-cycle losses — stable afterwards, but not reversible:
 
 - `{panel:title=T}body{panel}` becomes a blockquote with a bold title.
 - `[Display Name|~user]` keeps the mention, drops the display name.
+- Image parameters (`thumbnail`, `width`, …) are dropped; the alt text
+  and the source survive.
+- A link's title (`[t|url|title]`) is dropped.
 - Jira's Confluence-lookalike macros (`{note}`, `{info}`, `{tip}`,
   `{toc}`, …) are literal text in Jira, and are escaped as such.
 
+Two degenerate shapes need a second cycle rather than one, and neither
+is worth contorting the converter for — both settle, and neither grows:
+a list whose *only* item is empty (Jira writes it as a bare `#`, which
+the wiki parser has no list to attach to and returns as a heading), and
+a list item whose entire content is `.` or `)` (CommonMark parsers read
+that as an ordered-list marker and nest a list inside the item). Both
+are pinned by `TestEmptyListItems`.
+
 ## Validation
 
-Three layers, run in CI order of cost:
+Five layers, run in CI order of cost:
 
 1. **Exact-output unit tests** —
-   `tests/unit/preprocessing/test_preprocessing.py`.
+   `tests/unit/preprocessing/test_preprocessing.py` and
+   `test_markup_edge_cases.py` (code-block shapes, inline-code shapes,
+   link and image shapes, table-cell hazards, escaping rules, empty list
+   items, degenerate input).
 2. **Structural output linting** —
    `tests/unit/preprocessing/test_jira_markup_validity.py` converts a
    hostile corpus and lints the output for damage (leftover backticks,
    merged braces, unbalanced macros, broken table rows, leaked
    placeholders).
-3. **Real-renderer oracle** — `tests/e2e/test_markup_rendering_dc.py`
+3. **Hazard matrix** —
+   `tests/unit/preprocessing/test_markup_edge_cases.py` places each of
+   ~60 hazardous tokens in each of ~30 structural contexts (~3 500
+   cases) and checks the invariants that must hold everywhere: no
+   crash, no leaked placeholder, structurally valid output, stable
+   under a read-modify-write cycle.
+4. **Property-based tests** —
+   `tests/unit/preprocessing/test_markup_properties.py` generates
+   Markdown documents with Hypothesis from the same hazardous alphabet
+   and asserts: never raises, structurally valid, code content is
+   verbatim, nothing is silently dropped, and the edit cycle settles
+   without growing. This is the layer that finds what nobody thought to
+   write down — the mention pattern that matched across a table cell,
+   the URL that grew a `%5C` per cycle, the empty blockquote that
+   aborted a whole document.
+5. **Real-renderer oracle** — `tests/e2e/test_markup_rendering_dc.py`
    renders 100+ converted cases through a live Jira DC wiki renderer
    and asserts on **browser-visible text** (entity decoding included)
    plus HTML structure and generic invariants. It also runs each

@@ -640,6 +640,104 @@ CORPUS: list[Case] = [
         [],
         [],
     ),
+    # --- regressions found by the hazard matrix and the property tests ---
+    (
+        "cell-heading-token",
+        "| a | b |\n|---|---|\n| h1. text | y |",
+        ["h1. text", "y"],
+        [],
+        ["confluenceTd"],
+        ["<h1"],
+    ),
+    (
+        "cell-quote-token",
+        "| a | b |\n|---|---|\n| bq. text | y |",
+        ["bq. text", "y"],
+        [],
+        [],
+        ["<blockquote"],
+    ),
+    (
+        "cell-trailing-backslash",
+        "| a | b |\n|---|---|\n| C:\\\\logs\\\\ | y |",
+        ["C:\\logs\\", "y"],
+        [],
+        [],
+        [],
+    ),
+    (
+        "prose-literal-backslash",
+        "regex \\\\* and C:\\\\Users\\\\test",
+        ["\\*", "C:\\Users\\test"],
+        [],
+        [],
+        [],
+    ),
+    (
+        "image-markup-in-link-text",
+        "[see !x.png! here](https://x.test/p)",
+        ["see !x.png! here"],
+        [],
+        ["href"],
+        ["<img"],
+    ),
+    (
+        "macro-in-image-alt",
+        "![a {code} b](https://x.test/i.png)",
+        [],
+        ["{code}"],
+        ["<img", 'alt="a &#123;code&#125; b"'],
+        ['class="code panel"'],
+    ),
+    (
+        "braces-in-image-url",
+        "![a](https://x.test/a{b}.png)",
+        [],
+        [],
+        ["<img", "a%7Bb%7D.png"],
+        [],
+    ),
+    ("empty-quote-line", "# T\n\n>\n\ntail", ["T", "tail"], [], [], []),
+    (
+        "empty-list-items",
+        "- a\n- \n- c",
+        ["a", "c"],
+        [],
+        ["<li"],
+        [],
+    ),
+    (
+        "autolink-with-brackets",
+        "<https://x.test/a[b]c>",
+        [],
+        [],
+        ["href", "a%5Bb%5Dc"],
+        [],
+    ),
+    (
+        "escaped-hash-line",
+        "\\# not an ordered item",
+        ["# not an ordered item"],
+        [],
+        [],
+        ["<ol"],
+    ),
+    (
+        "quote-containing-a-list",
+        "> intro\n>\n> 1. first\n> 2. second",
+        ["intro", "first", "second"],
+        [],
+        ["<blockquote", "<ol"],
+        [],
+    ),
+    (
+        "nested-image-in-link",
+        "[![alt](https://x.test/i.png)](https://x.test)",
+        [],
+        [],
+        ["<img", "href"],
+        [],
+    ),
     # --- composition ---
     (
         "kitchen-sink",
@@ -694,7 +792,8 @@ def test_rendered_output(
         assert "`" not in text, f"backtick visible{detail}"
     if 'class="error"' not in html_no:
         assert 'class="error"' not in html_out, f"Jira error span{detail}"
-    assert not _LEFTOVER_ESCAPE_RE.search(text), f"visible escape leftover{detail}"
+    if not any(_LEFTOVER_ESCAPE_RE.search(snippet) for snippet in vis_yes):
+        assert not _LEFTOVER_ESCAPE_RE.search(text), f"visible escape leftover{detail}"
 
 
 def test_rendered_issue_description_round_trip(

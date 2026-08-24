@@ -19,6 +19,10 @@ import pytest
 
 from mcp_atlassian.preprocessing.jira import JiraPreprocessor
 
+# A Markdown link that survived conversion: brackets with no Jira alias
+# pipe in them, followed by a parenthesised target on the same line.
+_MARKDOWN_LINK_RE = re.compile(r"(?<!\\)\[[^\]\n|]*\]\([^)\n]*\)")
+
 _CODE_BLOCK_RE = re.compile(
     r"\{code[^}]*\}[\s\S]*?\{code\}|\{noformat[^}]*\}[\s\S]*?\{noformat\}"
 )
@@ -46,8 +50,12 @@ def assert_valid_jira_markup(markup: str) -> None:
     # is fair game — drop the spans before the remaining checks.
     text = re.sub(r"\{\{.*\}\}", "", text)
 
-    # Any backtick outside code is unconverted Markdown
-    assert "`" not in text, f"Markdown backtick survived conversion: {markup!r}"
+    # A backtick *pair* around content outside code is an unconverted
+    # code span. A lone backtick is not: CommonMark leaves it as prose
+    # (an empty "``" is literal text), and Jira shows the character.
+    assert not re.search(r"`[^`\n]+`", text), (
+        f"Markdown code span survived conversion: {markup!r}"
+    )
 
     # Block macros must pair up (an odd count means an unterminated
     # block that swallows the rest of the document)
@@ -60,9 +68,11 @@ def assert_valid_jira_markup(markup: str) -> None:
         assert not re.fullmatch(r"\|[\s:|-]*-[\s:|-]*\|?", line.strip()), (
             f"Markdown table separator survived: {line!r}"
         )
-        # Markdown links/images must be converted ("](" never occurs in
-        # valid Jira markup)
-        assert "](" not in line, f"Markdown link survived: {line!r}"
+        # Markdown links/images must be converted. The pattern is
+        # deliberately whole-link: a bare "](" also occurs where a Jira
+        # link "[url]" is followed by author text starting with "(", and
+        # an escaped "\\]" is prose CommonMark left alone.
+        assert not _MARKDOWN_LINK_RE.search(line), f"Markdown link survived: {line!r}"
         # A newline inside a table row splits it; every table line must
         # start and end with a pipe
         if line.startswith("|"):

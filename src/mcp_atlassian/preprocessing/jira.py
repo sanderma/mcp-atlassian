@@ -19,20 +19,21 @@ all three in sync when changing behavior here (AGENTS.md rule 9).
 import html
 import logging
 import re
+import threading
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
+from urllib.parse import quote
 
-from jira2markdown import convert as _jira2markdown_convert
 from jira2markdown.elements import MarkupElements
 from jira2markdown.markup.advanced import Code, Noformat
 from jira2markdown.markup.images import Image
 from jira2markdown.markup.links import Mention
 from jira2markdown.markup.text_effects import Monospaced
+from mistletoe import block_token
 from mistletoe.block_token import Document
-from mistletoe.contrib import jira_renderer as jira_renderer_module
 from mistletoe.contrib.jira_renderer import JiraRenderer
-from pyparsing import ParseResults
+from pyparsing import Forward, ParserElement, ParseResults
 
 from .base import BasePreprocessor, _extract_blocks, _restore_blocks
 
@@ -98,23 +99,26 @@ class _Monospaced(Monospaced):
 
 
 class _Image(Image):
-    """!url|alt=text! conversion that keeps the alt text.
+    """!url|alt=text! conversion that keeps the alt and nothing else.
 
-    jira2markdown discards every attribute but width and height and uses
-    the URL as the alt, so the description an author wrote is lost on the
-    first read and cannot be written back.
+    jira2markdown discards the alt an author wrote, substitutes the URL
+    for it, and keeps the sizing parameters as a Pandoc suffix this
+    renderer cannot write back - so the alt was lost on the first read
+    and the size reappeared as visible text on the first write.
     """
 
     def action(self, tokens: ParseResults) -> str:
         attrs = self._parse_attrs(tokens.attrs or [])
-        alt = attrs.get("alt") or tokens.url
-        sized = " ".join(
-            f"{name}={value}"
-            for name, value in attrs.items()
-            if name in self.ALLOWED_ATTRS
-        )
-        suffix = f"{{{sized}}}" if sized else ""
-        return f"![{alt}]({tokens.url}){suffix}"
+        # No alt in the markup means no alt in the Markdown. Falling back
+        # to the URL (jira2markdown's default) invents an alt that the
+        # write path then adds, so each cycle grows a new "alt=" clause.
+        alt = html.unescape(attrs.get("alt", ""))
+        # Jira's sizing parameters have no CommonMark equivalent.
+        # jira2markdown emits a Pandoc "{width=200}" suffix, which this
+        # renderer has no rule for, so it comes back as visible junk
+        # text next to the image. Dropping it loses the size; keeping it
+        # loses the image.
+        return f"![{alt}]({tokens.url})"
 
 
 class _Mention(Mention):
@@ -139,6 +143,32 @@ _WIKI_ELEMENTS.replace(Image, _Image)
 _WIKI_ELEMENTS.replace(Mention, _Mention)
 
 
+# jira2markdown.convert() rebuilds the whole pyparsing grammar on every
+# call - around 130ms of the ~150ms a conversion took, on every field of
+# every issue read. The grammar depends only on the element list, so it
+# is built once here. A lock guards the shared parser: pyparsing makes
+# no re-entrancy promise, and the server serves requests concurrently.
+_WIKI_GRAMMAR_LOCK = threading.Lock()
+_WIKI_GRAMMAR: ParserElement | None = None
+
+
+def _wiki_grammar() -> ParserElement:
+    """The wiki-markup parser, built once and reused."""
+    global _WIKI_GRAMMAR
+    if _WIKI_GRAMMAR is None:
+        inline_markup: ParserElement = Forward()
+        markup: ParserElement = Forward()
+        inline_markup <<= _WIKI_ELEMENTS.expr(
+            inline_markup,
+            markup,
+            {},
+            filter(lambda element: element.is_inline_element, _WIKI_ELEMENTS),
+        )
+        markup <<= _WIKI_ELEMENTS.expr(inline_markup, markup, {}, _WIKI_ELEMENTS)
+        _WIKI_GRAMMAR = markup
+    return _WIKI_GRAMMAR
+
+
 @lru_cache(maxsize=128)
 def _convert_wiki_cached(text: str) -> str:
     """Convert Jira wiki markup to Markdown, memoized.
@@ -146,7 +176,8 @@ def _convert_wiki_cached(text: str) -> str:
     Issue descriptions are converted repeatedly across get/search
     calls; the conversion is pure, so caching is safe.
     """
-    return _jira2markdown_convert(text, elements=_WIKI_ELEMENTS)
+    with _WIKI_GRAMMAR_LOCK:
+        return str(_wiki_grammar().transform_string(text))
 
 
 # Lines using Jira's own nested-list syntax (e.g. "** item", "*# item").
@@ -156,8 +187,11 @@ def _convert_wiki_cached(text: str) -> str:
 _JIRA_NESTED_LIST_RE = r"^(?!#+ )[*#]{2,} .*$"
 
 # Jira user mentions like [~username] or [~accountid:...] must survive
-# Markdown parsing untouched.
-_JIRA_MENTION_RE = r"\[~[^\]\n]+\]"
+# Markdown parsing untouched. The character class is deliberately narrow:
+# a looser "anything up to the next ]" matches across a table cell
+# boundary (the "[~ | ]" in "| [~ | ]( |"), and passing that through
+# verbatim hands Jira a link that eats the row.
+_JIRA_MENTION_RE = r"\[~(?:accountid:)?[\w.@-]+\]"
 
 # Jira renders {anchor:name} as a link target and the read path hands it
 # back verbatim, so the write path has to accept it: entity-encoding it
@@ -193,6 +227,23 @@ _EMPHASIS_REPAIR_PROTECTED_RE = (
     + r"|![^\s!|]+(?:\|[^!\n]*)?!"
     + r"|https?://\S+"
 )
+
+
+# A blank line ends a list in Jira, so two adjacent lists cannot be
+# represented - and CommonMark splits "- \n- x" into exactly that (an
+# empty item, then the rest). Rendering the split faithfully put a blank
+# line inside what Jira reads as one list, and the markup then flipped
+# between the two forms on every edit.
+_SPLIT_LIST_RE = re.compile(r"^([*#]+[ \t].*)\n\n(?=[*#]+[ \t])", re.MULTILINE)
+
+
+def _join_split_lists(markup: str) -> str:
+    """Close the blank line CommonMark leaves between adjacent lists."""
+    previous = None
+    while previous != markup:
+        previous = markup
+        markup = _SPLIT_LIST_RE.sub(r"\1\n", markup)
+    return markup
 
 
 def _repair_intraword_emphasis(markup: str) -> str:
@@ -283,6 +334,12 @@ _LINE_START_NEUTRALIZERS = [
     (re.compile(r"^bq\.", re.IGNORECASE), "bq&#46;"),
     (re.compile(r"^\|"), "&#124;"),
     (re.compile(r"^-(-+)"), r"&#45;\1"),
+    # Jira numbers lists with "#", so a paragraph line starting with one
+    # is an ordered item there. Markdown's "\#" escape leaves a bare "#"
+    # in the text, which then renders as a list instead of a hash.
+    # "*", "-" and "+" need no rule: the escaper already backslashes
+    # them, and Jira renders "\* x" as the literal characters.
+    (re.compile(r"^#(#*)(?=\s)"), r"&#35;\1"),
 ]
 
 
@@ -294,9 +351,17 @@ def _neutralize_line_start(line: str) -> str:
     return line
 
 
-# Characters the write path escapes in prose, and which therefore have to
-# be un-escaped on the way back so a read-modify-write cycle is stable.
-_JIRA_ESCAPABLE = "*_-+^~[]{}|!?()&#:;."
+# Characters for which Jira consumes a preceding backslash, so a literal
+# backslash in front of one is lost unless it is written as an entity.
+# Probed character by character against the DC 10.3 renderer; every other
+# character keeps its backslash (see the escaping table in
+# docs/advanced/markdown-to-jira.mdx).
+_JIRA_CONSUMES_BACKSLASH = "!#%()*+-?@[]^_{|}~"
+
+# The same set drives the read path: those are exactly the escapes Jira
+# text can contain, and they have to be inverted so a read-modify-write
+# cycle is stable.
+_JIRA_ESCAPABLE = _JIRA_CONSUMES_BACKSLASH
 
 # Of those, the ones that would be re-parsed as Markdown if handed back
 # bare, so they are returned escaped for Markdown instead.
@@ -310,24 +375,48 @@ _NUMERIC_ENTITY_RE = re.compile(r"&#(\d{1,4});")
 # when a restored literal lands at the beginning of a line.
 _LINE_START_MARKDOWN = set("+-*#>|~=")
 
+# The run of blockquote and list markers that can open a Markdown line.
+# Everything up to the end of it still counts as the start of the line.
+_MARKDOWN_LINE_PREFIX_RE = re.compile(r"^(?:[ \t]*(?:>|[-*+]|\d+[.)]))*[ \t]*")
+
 
 def _to_markdown_literal(char: str) -> str:
     """Represent ``char`` as literal text in Markdown."""
     return f"\\{char}" if char in _MARKDOWN_SPECIAL else char
 
 
-def _markdown_literal_at(char: str, text: str, index: int) -> str:
+def _markdown_literal_at(char: str, text: str, index: int, end: int) -> str:
     """Represent ``char`` literally, given where in ``text`` it lands.
 
     Position matters: a ``+`` mid-sentence is plain text, but the same
-    ``+`` opening a line is a bullet, and ``.`` after a leading number is
-    an ordered list.
+    ``+`` opening a line is a bullet, ``.`` after a leading number is an
+    ordered list, and a backslash before a table cell's closing ``|``
+    escapes the delimiter instead of standing for itself.
     """
     line = text[text.rfind("\n", 0, index) + 1 : index]
-    if not line.strip():
+    # Block markers do not end the line start: in "> >" the second ">"
+    # opens a nested quote, and in "1. >" it opens one inside the item,
+    # rather than being the character the author wrote.
+    before = line[_MARKDOWN_LINE_PREFIX_RE.match(line).end() :]
+    in_table_row = before.startswith("|")
+    if char == "|" and in_table_row:
+        # Inside a Markdown table row a bare "|" opens the next cell, so
+        # a literal one has to stay escaped on the way back.
+        return "\\|"
+    if char == "\\":
+        following = text[end : end + 1]
+        # A backslash is only literal when something ordinary follows it.
+        # Before a cell's closing "|" it escapes the delimiter - GFM
+        # splits on any "|" not directly preceded by a backslash, without
+        # counting them - and at the end of a line it is a hard break. A
+        # space separates it from either; Markdown strips it from a cell
+        # and it is invisible at a line ending.
+        if following in ("", "\n") or (in_table_row and following == "|"):
+            return "\\\\ "
+    if not before:
         if char in _LINE_START_MARKDOWN:
             return f"\\{char}"
-    elif char in ".)" and line.strip().isdigit():
+    elif char in ".)" and before.strip().isdigit():
         return f"\\{char}"
     return _to_markdown_literal(char)
 
@@ -353,7 +442,18 @@ def _lift_escapes(markup: str) -> str:
 # Line openers that mean nothing in Jira but start a block in Markdown:
 # Jira numbers lists with "#", quotes with "bq." and bullets with "*",
 # so these are prose there and have to stay prose after conversion.
-_JIRA_PROSE_LINE_START_RE = re.compile(r"^[ \t]*(\d+[.)]|[>+])(?=\s)", re.MULTILINE)
+_JIRA_PROSE_LINE_START_RE = re.compile(
+    # "$" as well as whitespace: a line that is only ">" is prose in
+    # Jira but an empty blockquote in Markdown, which converts back to
+    # an empty {quote} and then to nothing at all.
+    # A Jira block marker ("bq.", "*", "#" and their runs) is consumed by
+    # the conversion and replaced with a Markdown one, which promotes
+    # whatever followed it to the start of a Markdown line. ">" needs no
+    # trailing space to open a Markdown blockquote; a bullet and an
+    # ordered item do.
+    r"^[ \t]*(?:(?:bq\.|[*#]+)[ \t]*)?(\d+[.)](?=\s|$)|\+(?=\s|$)|>)",
+    re.MULTILINE,
+)
 
 
 def _lift_markdown_line_starts(markup: str) -> str:
@@ -400,7 +500,9 @@ def _restore_jira_literals(markdown: str) -> str:
     """Restore placeholders from :func:`_unescape_jira_literals`."""
     return re.sub(
         r"\x00JESC(\d+)\x00",
-        lambda m: _markdown_literal_at(chr(int(m.group(1))), markdown, m.start()),
+        lambda m: _markdown_literal_at(
+            chr(int(m.group(1))), markdown, m.start(), m.end()
+        ),
         markdown,
     )
 
@@ -413,7 +515,9 @@ def _decode_prose_entities(markdown: str) -> str:
     Markdown is returned escaped.
     """
     return _NUMERIC_ENTITY_RE.sub(
-        lambda m: _markdown_literal_at(chr(int(m.group(1))), markdown, m.start()),
+        lambda m: _markdown_literal_at(
+            chr(int(m.group(1))), markdown, m.start(), m.end()
+        ),
         markdown,
     )
 
@@ -693,6 +797,7 @@ class JiraMarkupRenderer(JiraRenderer):
         self.normalize_language = normalize_language
         self._span_color_stack: list[bool] = []
         self._table_cell_depth = 0
+        self._link_text_depth = 0
 
     # Jira's emphasis engine triggers *bold* and _italic_ even inside
     # words on some versions (the classic "snake_case turns italic"
@@ -751,6 +856,10 @@ class JiraMarkupRenderer(JiraRenderer):
             # backslash-escaping does not work there, the HTML entity
             # is the documented workaround.
             escaped = escaped.replace("|", "&#124;")
+        if self._link_text_depth:
+            # Inside [alias|url], "|" ends the alias and "!" opens image
+            # markup. Neither is escapable there.
+            escaped = escaped.replace("|", "&#124;").replace("!", "&#33;")
         return escaped
 
     def render_paragraph(self, token: Any) -> str:
@@ -776,7 +885,25 @@ class JiraMarkupRenderer(JiraRenderer):
             if char in self._BRACE_ENTITIES:
                 result.append(self._BRACE_ENTITIES[char])
                 continue
-            if char in self._MACRO_CHARS or char in self._EMPHASIS_CHARS:
+            if char == "\\":
+                # Jira reads a backslash as an escape and drops it in
+                # front of !#%()*+-?@[]^_{|}~ - and at the end of a
+                # table cell it escapes the closing delimiter, merging
+                # the cell with the next one. Which of those applies
+                # depends on the *rendered* neighbour, not the one in
+                # this token, so every literal backslash is encoded.
+                # &#92; displays as "\" in prose, headings and cells.
+                result.append("&#92;")
+                continue
+            if char in self._MACRO_CHARS:
+                # Brackets only ever mean link markup to Jira, and the
+                # neighbour that would justify leaving one alone can sit
+                # in the next inline token, out of this call's sight -
+                # "text [" and "](url)" arrive separately. "\\[" renders
+                # as "[" everywhere, so they are always escaped.
+                result.append("\\" + char)
+                continue
+            if char in self._EMPHASIS_CHARS:
                 if prev_solid or next_solid:
                     result.append("\\" + char)
                     continue
@@ -843,21 +970,104 @@ class JiraMarkupRenderer(JiraRenderer):
         # "!" ends the image markup, "|" and "," separate its
         # parameters; none of them are escapable inside it.
         alt = " ".join(alt.replace("!", "").replace("|", " ").replace(",", " ").split())
+        # Macros still run inside the alt: a "{code}" there terminates
+        # the image and swallows the rest of the paragraph. Entities are
+        # the one representation Jira passes through ("&" first, so
+        # entity-looking text stays literal).
+        for char, entity in (
+            ("&", "&#38;"),
+            ("{", "&#123;"),
+            ("}", "&#125;"),
+            ("[", "&#91;"),
+            ("]", "&#93;"),
+        ):
+            alt = alt.replace(char, entity)
+        # The source is markup too: a brace in it macro-parses, a pipe
+        # opens a parameter and a "!" ends the image. escape_url
+        # percent-encodes the first two; "!" has no encoding Jira
+        # accepts here, so an image whose URL contains one is dropped
+        # rather than allowed to swallow the paragraph.
+        src = self._escape_target(token.src)
+        if not src:
+            return alt
+        if "!" in src:
+            return alt or src.replace("!", "")
         if alt:
-            return f"!{token.src}|alt={alt}!"
-        return f"!{token.src}!"
+            return f"!{src}|alt={alt}!"
+        return f"!{src}!"
+
+    # The Jira link delimiters, minus the characters that carry meaning
+    # inside a URL. "[", "]" and "|" are percent-encoded instead of
+    # backslash-escaped (see _escape_target).
+    _URI_SAFE = ":/?#@!$&'()*+,;=%"
+
+    @classmethod
+    def _escape_target(cls, target: str) -> str:
+        """Percent-encode a link target for [alias|target].
+
+        The stock renderer backslash-escapes "[", "]" and "|" here. Jira
+        drops the backslash when rendering, but the read path hands it
+        back as part of the URL and the next write percent-encodes it -
+        so the target grows a "%5C" on every edit cycle. Percent-encoding
+        is inverted by the browser, not by us, so nothing accumulates.
+        """
+        return quote(target, safe=cls._URI_SAFE)
+
+    def render_auto_link(self, token: Any) -> str:
+        return f"[{self._escape_target(token.target)}]"
 
     def render_link(self, token: Any) -> str:
         # "|" separates alias from URL in [text|url] and cannot be
-        # escaped, so pipes in the visible text become HTML entities.
-        inner = self.render_inner(token).replace("|", "&#124;")
-        target = jira_renderer_module.escape_url(token.target)
+        # escaped, so pipes in the visible *text* become HTML entities;
+        # "!" too, because Jira runs image markup inside a link alias
+        # and "see !x.png! here" would render a broken-image icon in
+        # place of the author's words. Both are neutralized where the
+        # text is rendered, so a genuine nested image keeps its own
+        # delimiters (see render_raw_text).
+        self._link_text_depth += 1
+        try:
+            inner = self.render_inner(token)
+        finally:
+            self._link_text_depth -= 1
+        if inner.startswith("^"):
+            # "[^name]" is Jira's attachment-link syntax, so an alias
+            # opening with a caret turns the link into a broken
+            # attachment reference. Jira drops the backslash when it
+            # renders, leaving the caret the author wrote.
+            inner = "\\" + inner
+        target = self._escape_target(token.target)
+        if not target:
+            # "[text|]" is not a link, and the stray "|" splits a table
+            # cell. A link with no destination is just its text.
+            return inner
+        # The title is display text, so it takes the same entities the
+        # alias does rather than escapes Jira would strip.
         title = (
-            "|" + jira_renderer_module.escape_link_chars(token.title)
+            "|"
+            + token.title.replace("[", "&#91;")
+            .replace("]", "&#93;")
+            .replace("|", "&#124;")
             if token.title
             else ""
         )
         return f"[{inner}|{target}{title}]"
+
+    def render_list_item(self, token: Any) -> str:
+        prefix = "".join(self.listTokens)
+        inner = self.render_inner(token)
+        children = getattr(token, "children", None) or []
+        # A nested list starts its own lines. Without the break its
+        # markers follow the parent's on one line, and Jira reads the
+        # run as a deeper level: "- \n  - x" became "* ** x", one item.
+        opens_with_a_list = children and isinstance(children[0], block_token.List)
+        rendered = prefix + ("\n" if opens_with_a_list else " ") + inner
+        # The newline after an item comes from the block inside it, so
+        # an empty item produces none and the next item lands on the
+        # same line - where its marker reads as a deeper nesting level
+        # ("* a\n* * c" for three bullets, losing one of them).
+        if not rendered.endswith("\n"):
+            rendered += "\n"
+        return rendered
 
     def render_table_cell(self, token: Any, in_header: bool = False) -> str:
         template = "||{inner}" if in_header else "|{inner}"
@@ -873,6 +1083,10 @@ class JiraMarkupRenderer(JiraRenderer):
         # A raw newline (from a hard break or <br>) ends the table row;
         # Jira's in-cell line break is "\\" without a newline.
         inner = re.sub(r"(?:\\\\)?\n", r" \\\\ ", inner).strip()
+        # A cell opens a line as far as Jira is concerned: "h1." or "bq."
+        # at the start of one renders as a heading or a quote and eats
+        # the cell's content.
+        inner = _neutralize_line_start(inner)
         return template.format(inner=inner or " ")
 
     def render_line_break(self, token: Any) -> str:
@@ -888,12 +1102,24 @@ class JiraMarkupRenderer(JiraRenderer):
         return "----" + self._block_eol(token)
 
     def render_quote(self, token: Any) -> str:
+        # A bare "> " line quotes nothing. Rendering it as an empty
+        # {quote} is better than raising: the caller falls back to
+        # sending the *whole* document to Jira as unconverted Markdown.
+        if not token.children:
+            return "{quote}\n{quote}" + self._block_eol(token)
         # "bq. " only quotes a single line; any quote whose content
         # spans multiple lines needs a {quote} block.
         self.lastChildOfQuotes.append(token.children[-1])
         inner = self.render_inner(token)
         del self.lastChildOfQuotes[-1]
-        if len(token.children) == 1 and "\n" not in inner.rstrip("\n"):
+        # "bq." quotes one line of prose. A list inside it has to use
+        # the block form: "bq. # x" puts the list marker mid-line, where
+        # Jira reads it as text and the read path as a heading.
+        if (
+            len(token.children) == 1
+            and isinstance(token.children[0], block_token.Paragraph)
+            and "\n" not in inner.rstrip("\n")
+        ):
             return "bq. " + inner + self._block_eol(token)[0:-1]
         return "{quote}\n" + inner + "{quote}" + self._block_eol(token)
 
@@ -1188,7 +1414,7 @@ class JiraPreprocessor(BasePreprocessor):
                 "Input exceeds %d chars; using regex wiki-markup fallback",
                 _WIKI_PARSER_MAX_CHARS,
             )
-            return _restore_jira_literals(_regex_jira_to_markdown(markup).rstrip("\n"))
+            return _restore_jira_literals(_regex_jira_to_markdown(markup).strip("\n"))
 
         try:
             output = _convert_wiki_cached(markup)
@@ -1196,7 +1422,7 @@ class JiraPreprocessor(BasePreprocessor):
             logger.warning(f"Error parsing Jira markup, using regex fallback: {e}")
             try:
                 return _restore_jira_literals(
-                    _regex_jira_to_markdown(markup).rstrip("\n")
+                    _regex_jira_to_markdown(markup).strip("\n")
                 )
             except Exception:
                 return input_text
@@ -1236,7 +1462,11 @@ class JiraPreprocessor(BasePreprocessor):
         output = _restore_blocks(output, inline_codes, "J2MINLINE")
         output = _restore_blocks(output, code_blocks, "J2MCODE")
 
-        return output.rstrip("\n")
+        # Leading newlines are insignificant in Markdown but not to the
+        # write path: jira2markdown emits one for a list that opens with
+        # an empty item, and it comes back as a blank line between the
+        # items, so the markup flipped between two forms on every edit.
+        return output.strip("\n")
 
     def _normalize_code_language(self, lang: str | None) -> str | None:
         """
@@ -1338,6 +1568,7 @@ class JiraPreprocessor(BasePreprocessor):
             output = renderer.render(Document(output))
 
         output = output.rstrip("\n")
+        output = _join_split_lists(output)
         output = _repair_intraword_emphasis(output)
         output = _restore_blocks(output, jira_lists, "JIRALIST")
         output = _restore_blocks(output, mentions, "JIRAMENTION")

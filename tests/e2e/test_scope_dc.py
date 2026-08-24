@@ -12,6 +12,7 @@ Run with a Jira DC instance up (see tests/e2e/docker/README.md):
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Iterator
 
@@ -32,6 +33,11 @@ def dc_jira() -> DCInstanceInfo:
     info = DCInstanceInfo()
     if not _check_dc_health(info.jira_url):
         pytest.skip(f"Jira DC not reachable at {info.jira_url}")
+    # Same reason as conftest's dc_instance: the SSRF pinning adapter
+    # only trusts hosts named in the environment, so without this the
+    # file passes when run beside the rest of the suite and fails with
+    # "localhost resolves to non-global address" when run on its own.
+    os.environ.setdefault("JIRA_URL", info.jira_url)
     return info
 
 

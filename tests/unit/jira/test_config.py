@@ -600,3 +600,57 @@ def test_is_auth_configured_cert_missing():
         auth_type="cert",
     )
     assert config.is_auth_configured() is False
+
+
+class TestScopeBoundarySplitting:
+    """A boundary's predicate and its sort order are kept apart.
+
+    The predicate has to stay composable — it is ANDed into other queries
+    as ``(clause)``, where a sort order is invalid — while the sort is
+    still worth honouring as a default rather than discarding.
+    """
+
+    def test_read_filter_keeps_its_sort(self, monkeypatch):
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_PERSONAL_TOKEN", "token")
+        monkeypatch.setenv("JIRA_JQL_FILTER", "project = PROJ ORDER BY priority DESC")
+        config = JiraConfig.from_env()
+        assert config.jql_filter == "project = PROJ"
+        assert config.jql_filter_order_by == "ORDER BY priority DESC"
+
+    def test_read_filter_without_a_sort(self, monkeypatch):
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_PERSONAL_TOKEN", "token")
+        monkeypatch.setenv("JIRA_JQL_FILTER", "project = PROJ")
+        config = JiraConfig.from_env()
+        assert config.jql_filter == "project = PROJ"
+        assert config.jql_filter_order_by is None
+
+    def test_the_split_is_quote_aware(self, monkeypatch):
+        """A filter searching for the words "order by" is not a sort.
+
+        The previous regex truncated this to 'summary ~ "fix', which is
+        not valid JQL, and broke every Jira call on the server.
+        """
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_PERSONAL_TOKEN", "token")
+        monkeypatch.setenv(
+            "JIRA_JQL_FILTER", 'summary ~ "fix ORDER BY clause" AND project = PROJ'
+        )
+        config = JiraConfig.from_env()
+        assert config.jql_filter == (
+            'summary ~ "fix ORDER BY clause" AND project = PROJ'
+        )
+        assert config.jql_filter_order_by is None
+
+    def test_write_filter_drops_its_sort(self, monkeypatch, caplog):
+        """A write boundary only decides whether an issue may change."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_PERSONAL_TOKEN", "token")
+        monkeypatch.setenv(
+            "JIRA_WRITE_JQL_FILTER", "labels = automation ORDER BY created"
+        )
+        with caplog.at_level(logging.WARNING):
+            config = JiraConfig.from_env()
+        assert config.write_jql_filter == "labels = automation"
+        assert "ORDER BY" in caplog.text

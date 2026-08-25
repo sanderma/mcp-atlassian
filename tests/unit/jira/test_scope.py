@@ -401,3 +401,61 @@ class TestReadScopeHelper:
         """issues.get_issue and the scope checks must agree on casing."""
         config = FakeConfig(projects_filter="foo")
         assert keys_outside_projects_filter(["FOO-1"], config) == []
+
+
+class TestBoundarySortOrder:
+    """A sort order on the read boundary is a default, not a constraint.
+
+    Operators paste JQL copied from a saved filter, which almost always
+    ends in ORDER BY. The sort cannot live inside the ``(clause)`` the
+    boundary is ANDed in as, so it is carried separately and appended to
+    queries that name no sort of their own.
+    """
+
+    def _config(self, **overrides):
+        base = {
+            "jql_filter": "project = PROJ",
+            "jql_filter_order_by": "ORDER BY priority DESC",
+            "projects_filter": None,
+            "write_jql_filter": None,
+        }
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_sort_is_appended_to_an_unsorted_query(self):
+        assert apply_read_scope("status = Open", self._config()) == (
+            "(status = Open) AND (project = PROJ) ORDER BY priority DESC"
+        )
+
+    def test_sort_applies_to_an_empty_query(self):
+        assert apply_read_scope("", self._config()) == (
+            "project = PROJ ORDER BY priority DESC"
+        )
+
+    def test_the_callers_own_sort_wins(self):
+        """The boundary bounds what is visible, not how it is ordered."""
+        assert apply_read_scope(
+            "status = Open ORDER BY created ASC", self._config()
+        ) == ("(status = Open) AND (project = PROJ) ORDER BY created ASC")
+
+    def test_a_sort_with_no_predicate_still_applies(self):
+        config = self._config(jql_filter=None)
+        assert apply_read_scope("status = Open", config) == (
+            "status = Open ORDER BY priority DESC"
+        )
+
+    def test_no_sort_configured_changes_nothing(self):
+        config = self._config(jql_filter_order_by=None)
+        assert apply_read_scope("status = Open", config) == (
+            "(status = Open) AND (project = PROJ)"
+        )
+
+    def test_no_boundary_at_all_is_a_passthrough(self):
+        config = self._config(jql_filter=None, jql_filter_order_by=None)
+        assert apply_read_scope("status = Open", config) == "status = Open"
+
+    def test_the_sort_survives_the_projects_filter(self):
+        config = self._config(projects_filter="PROJ,DEVOPS")
+        result = apply_read_scope("status = Open", config)
+        assert result.endswith("ORDER BY priority DESC")
+        assert "project IN (PROJ, DEVOPS)" in result

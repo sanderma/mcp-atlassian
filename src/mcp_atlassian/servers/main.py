@@ -144,9 +144,21 @@ def _report_jira_scope(jira_config: JiraConfig) -> None:
     it. Logged at WARNING so an active security boundary — and a broken
     one — are visible at the default verbosity.
     """
+    # The read filter's sort is reported beside its predicate: it is part
+    # of what the operator configured, and it reaches Jira on every query
+    # that names no sort of its own.
+    read_parts = [
+        part
+        for part in (jira_config.jql_filter, jira_config.jql_filter_order_by)
+        if isinstance(part, str) and part.strip()
+    ]
+    # Fall back to the raw attribute for configs that are not plain
+    # strings (test doubles, partially-built configs): this is a log line,
+    # and it must not be the thing that fails startup.
+    read_filter = " ".join(read_parts) if read_parts else jira_config.jql_filter
     boundaries = [
         ("JIRA_PROJECTS_FILTER", jira_config.projects_filter),
-        ("JIRA_JQL_FILTER", jira_config.jql_filter),
+        ("JIRA_JQL_FILTER", read_filter),
         ("JIRA_WRITE_JQL_FILTER", jira_config.write_jql_filter),
     ]
     active = [(name, value) for name, value in boundaries if value]

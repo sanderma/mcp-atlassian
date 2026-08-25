@@ -183,11 +183,20 @@ def scope_is_configured(config: Any) -> bool:
 
 
 def apply_jql_filter(jql: str, config: Any) -> str:
-    """Constrain ``jql`` to the configured read boundary (JIRA_JQL_FILTER)."""
+    """Constrain ``jql`` to the configured read boundary (JIRA_JQL_FILTER).
+
+    A sort order on the boundary becomes the default sort: it is appended
+    to queries that name none, and never overrides one the caller asked
+    for. Operators paste JQL from a saved filter, and the sort they chose
+    there is the order they expect to see results in.
+    """
     jql_filter = _str_option(config, "jql_filter")
-    if not jql_filter:
+    order_by = _str_option(config, "jql_filter_order_by")
+    if not jql_filter and not order_by:
         return jql
-    constrained = and_jql_clause(jql, jql_filter)
+    constrained = and_jql_clause(jql, jql_filter) if jql_filter else jql
+    if order_by and not _split_order_by(constrained)[1]:
+        constrained = f"{constrained.rstrip()} {order_by}".strip()
     logger.info("Applied JQL read filter to query: %s", constrained)
     return constrained
 

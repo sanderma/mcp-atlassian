@@ -88,10 +88,15 @@ unrestricted, writes do not.
   extra JQL search to validate them (batched, 20 keys per query). With no
   boundary configured the check is skipped entirely — no client is even
   resolved — so the default configuration is unaffected.
-- **Sort orders are dropped.** A boundary is ANDed into other queries as
-  `(clause)`, where a sort order is invalid, so a trailing `ORDER BY` is
-  stripped from either filter at startup and a warning is logged. JQL copied
-  from a saved filter can be pasted as-is.
+- **Sort orders become the default sort.** A boundary is ANDed into other
+  queries as `(clause)`, where a sort order is invalid, so a trailing
+  `ORDER BY` is carried separately rather than composed. On `JIRA_JQL_FILTER`
+  it is appended to every query that names no sort of its own, and never
+  overrides one the agent asked for — paste a saved filter and results come
+  back in the order you chose. On `JIRA_WRITE_JQL_FILTER` it is dropped with a
+  warning: that boundary only ever decides whether an issue may change, so
+  there is nothing for a sort to order. The split is quote-aware, so a filter
+  searching for the words "order by" is not mistaken for a sort clause.
 
 When a call is refused, the agent gets an explicit error rather than a generic
 failure — and one that says the boundary is fixed, so it does not retry or go
@@ -109,6 +114,28 @@ around it.
 A boundary the Jira instance cannot evaluate (an invalid field, a typo) is
 reported differently — as a server misconfiguration for the operator to fix,
 not as a permission decision — and access is still refused.
+
+### Default sort
+
+A sort on the read boundary is the order the agent sees results in unless it
+asks for another:
+
+```bash
+JIRA_JQL_FILTER=project = PROJ ORDER BY priority DESC
+```
+
+| Agent asks for | Sent to Jira |
+|---|---|
+| *(no query)* | `project = PROJ ORDER BY priority DESC` |
+| `status = Open` | `(status = Open) AND (project = PROJ) ORDER BY priority DESC` |
+| `status = Open ORDER BY created ASC` | `(status = Open) AND (project = PROJ) ORDER BY created ASC` |
+
+A sort with no predicate is a valid configuration on its own — it sets a house
+default without restricting anything:
+
+```bash
+JIRA_JQL_FILTER=ORDER BY updated DESC
+```
 
 ## Composing with the other limits
 

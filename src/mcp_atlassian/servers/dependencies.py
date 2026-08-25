@@ -832,10 +832,10 @@ def _carry_over_scope_boundaries(config: Any) -> None:
     """
     if not isinstance(config, JiraConfig):
         return
-    from mcp_atlassian.jira.config import _clean_scope_jql
+    from mcp_atlassian.jira.config import _clean_scope_jql, _split_scope_jql
 
-    config.jql_filter = _clean_scope_jql(
-        os.getenv("JIRA_JQL_FILTER"), "JIRA_JQL_FILTER"
+    config.jql_filter, config.jql_filter_order_by = _split_scope_jql(
+        os.getenv("JIRA_JQL_FILTER")
     )
     config.write_jql_filter = _clean_scope_jql(
         os.getenv("JIRA_WRITE_JQL_FILTER"), "JIRA_WRITE_JQL_FILTER"

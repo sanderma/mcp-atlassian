@@ -19,6 +19,7 @@ from ..utils.oauth import (
 )
 from ..utils.proxy import get_proxy_settings_from_env
 from ..utils.urls import is_atlassian_cloud_url
+from .scope import _split_order_by
 
 logger = logging.getLogger("mcp-atlassian.jira.config")
 
@@ -51,29 +52,41 @@ def _clean_optional(raw: str | None) -> str | None:
     return cleaned or None
 
 
-_TRAILING_ORDER_BY_RE = re.compile(r"\s+ORDER\s+BY\s+.*$", re.IGNORECASE)
+def _split_scope_jql(raw: str | None) -> tuple[str | None, str | None]:
+    """Split a scope JQL boundary into its predicate and its sort order.
 
+    Boundaries are ANDed into other queries as ``(clause)``, where a sort
+    order is invalid — but operators naturally paste JQL copied from a
+    saved filter, which almost always ends in ORDER BY. The two halves are
+    kept separately so the predicate stays composable and the sort can
+    still be honoured as a default (see ``apply_jql_filter``).
 
-def _clean_scope_jql(raw: str | None, setting: str) -> str | None:
-    """Normalize a scope JQL boundary, stripping a trailing ORDER BY.
-
-    Boundaries are ANDed into other queries as ``(clause)``. A sort order
-    is meaningless inside that and produces invalid JQL, which would break
-    every Jira call — and operators naturally paste JQL copied from a
-    saved filter, which almost always ends in ORDER BY.
+    The split is quote-aware, so a filter searching for the words "order
+    by" is not mistaken for a sort clause and truncated.
     """
     cleaned = _clean_optional(raw)
     if not cleaned:
-        return None
-    without_order = _TRAILING_ORDER_BY_RE.sub("", cleaned).strip()
-    if without_order != cleaned:
+        return None, None
+    predicate, order_by = _split_order_by(cleaned)
+    return predicate.strip() or None, order_by.strip() or None
+
+
+def _clean_scope_jql(raw: str | None, setting: str) -> str | None:
+    """Normalize a boundary used purely as a predicate, dropping any sort.
+
+    Used for the write boundary, which is only ever ANDed into an
+    ``issue IN (...)`` check — there is nothing for a sort order to order.
+    """
+    predicate, order_by = _split_scope_jql(raw)
+    if order_by:
         logger.warning(
-            "%s contains a trailing ORDER BY, which is not valid inside a "
-            "scope boundary; using %r instead.",
+            "%s contains a trailing ORDER BY. A write boundary only ever "
+            "decides whether an issue may be changed, so the sort is "
+            "ignored; using %r.",
             setting,
-            without_order,
+            predicate,
         )
-    return without_order or None
+    return predicate
 
 
 def _parse_internal_only_projects(raw: str | None) -> frozenset[str]:
@@ -208,6 +221,8 @@ class JiraConfig:
     ssl_verify: bool = True  # Whether to verify SSL certificates
     projects_filter: str | None = None  # List of project keys to filter searches
     jql_filter: str | None = None  # JQL ANDed into every query (read boundary)
+    # Sort order from JIRA_JQL_FILTER, applied to queries that name none
+    jql_filter_order_by: str | None = None
     write_jql_filter: str | None = None  # JQL an issue must match to be writable
     http_proxy: str | None = None  # HTTP proxy URL
     https_proxy: str | None = None  # HTTPS proxy URL
@@ -374,7 +389,7 @@ class JiraConfig:
         # JIRA_WRITE_JQL_FILTER narrows *within* that boundary: an issue must
         # match it for write tools to modify it, so everything readable but
         # unmatched is effectively read-only.
-        jql_filter = _clean_scope_jql(os.getenv("JIRA_JQL_FILTER"), "JIRA_JQL_FILTER")
+        jql_filter, jql_filter_order_by = _split_scope_jql(os.getenv("JIRA_JQL_FILTER"))
         write_jql_filter = _clean_scope_jql(
             os.getenv("JIRA_WRITE_JQL_FILTER"), "JIRA_WRITE_JQL_FILTER"
         )
@@ -418,6 +433,7 @@ class JiraConfig:
             ssl_verify=ssl_verify,
             projects_filter=projects_filter,
             jql_filter=jql_filter,
+            jql_filter_order_by=jql_filter_order_by,
             write_jql_filter=write_jql_filter,
             http_proxy=proxy_settings["http_proxy"],
             https_proxy=proxy_settings["https_proxy"],

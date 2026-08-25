@@ -183,3 +183,47 @@ def test_projects_filter_is_checked_without_api_call(dc_jira, scope_issues):
     fetcher = make_fetcher(dc_jira, projects_filter="SOMEOTHERPROJECT")
     ours = scope_issues["ours"]
     assert issues_outside_scope(fetcher, [ours], "read") == [ours]
+
+
+def test_boundary_sort_reaches_jira_and_orders_results(dc_jira, scope_issues):
+    """A sort on the read boundary has to be valid JQL where it lands.
+
+    It cannot live inside the "(clause)" the boundary is ANDed in as, so
+    it is carried separately and appended. This proves the composed query
+    is one Jira accepts, and that the order actually takes effect.
+    """
+    fetcher = make_fetcher(
+        dc_jira,
+        jql_filter=f"project = {PROJECT_KEY}",
+        jql_filter_order_by="ORDER BY key DESC",
+    )
+    descending = [issue.key for issue in fetcher.search_issues("", limit=50).issues]
+    assert descending, "the boundary should match the seeded issues"
+    assert descending == sorted(descending, reverse=True)
+
+    # The agent's own sort wins: the boundary bounds what is visible, not
+    # the order it is presented in.
+    ascending = [
+        issue.key
+        for issue in fetcher.search_issues("ORDER BY key ASC", limit=50).issues
+    ]
+    assert ascending == sorted(ascending)
+
+
+def test_boundary_sort_survives_a_caller_query(dc_jira, scope_issues):
+    fetcher = make_fetcher(
+        dc_jira,
+        jql_filter=f"project = {PROJECT_KEY}",
+        jql_filter_order_by="ORDER BY created DESC",
+    )
+    result = fetcher.search_issues(
+        f"summary ~ {scope_issues['ours'].split('-')[0]}", limit=50
+    )
+    assert result is not None  # the composed query is valid JQL to Jira
+
+
+def test_a_sort_only_boundary_restricts_nothing(dc_jira, scope_issues):
+    """ "JIRA_JQL_FILTER=ORDER BY ..." is a house default, not a limit."""
+    fetcher = make_fetcher(dc_jira, jql_filter=None, jql_filter_order_by="ORDER BY key")
+    keys = [scope_issues["ours"], scope_issues["theirs"]]
+    assert issues_outside_scope(fetcher, keys, "read") == []

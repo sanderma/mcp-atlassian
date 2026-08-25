@@ -216,7 +216,9 @@ async def _run_stdio_with_stdin_guard(run_kwargs: dict[str, object]) -> None:
     "--jira-jql-filter",
     help=(
         "JQL ANDed into every Jira query and required of any issue read by "
-        "key (read boundary), e.g. 'project = PROJ AND labels = agent'"
+        "key (read boundary), e.g. 'project = PROJ AND labels = agent'. A "
+        "trailing ORDER BY becomes the default sort for queries that name "
+        "none, so a saved filter can be pasted as-is."
     ),
 )
 @click.option(
